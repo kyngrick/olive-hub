@@ -95,6 +95,14 @@ on the verified 10200 English path.
    # this project's hub venv already has huggingface_hub 2.4.0 installed.
    # older installs may use: huggingface-cli login
    ```
+
+   If you are in **WSL bash** instead of PowerShell (prompt like
+   `olive@LAPTOP...:/mnt/c/Users/Geggais and Rick/...$`), use forward slashes:
+   ```bash
+   ./.venv/Scripts/hf.exe auth login
+   ```
+   Backslashes like `.\.venv\Scripts\hf.exe` are interpreted as one literal
+   filename in bash and give `command not found`.
    Paste the token when prompted. Alternatively set `HF_TOKEN=hf_...` in the
    environment of the process that runs Pocket TTS.
 6. Then `pocket-tts generate --voice <your.wav>` and `export-voice` work.

@@ -2915,6 +2915,39 @@ def parse_clock_target(text: str, allow_bare: bool = False) -> Optional[dt.datet
     return target
 
 
+def parse_when(text: str, allow_bare: bool = False) -> Optional[dt.datetime]:
+    """Parse a spoken time, honouring tomorrow / tonight / morning / night.
+
+    parse_clock_target only handles the clock and rolls past times forward one
+    day; it ignores words like 'tomorrow' and 'night'.  Alarms and reminders
+    need those words to choose the right day and am/pm.
+    """
+    seconds = parse_duration(text)
+    if seconds:
+        return dt.datetime.now() + dt.timedelta(seconds=seconds)
+    target = parse_clock_target(text, allow_bare=allow_bare)
+    if target is None:
+        return None
+    low = normalise(text)
+    night = bool(re.search(r"\b(?:night|evening|tonight|stasera|notte|sera)\b", low))
+    morning = bool(re.search(r"\b(?:morning|mattina|am)\b", low))
+    if re.search(r"\b(?:tonight|stasera|this evening)\b", low):
+        target = dt.datetime.combine(dt.date.today(), target.time())
+        if night and not morning and target.hour < 12:
+            target = target.replace(hour=target.hour + 12)
+    elif re.search(r"\b(?:tomorrow|domani)\b", low):
+        target = dt.datetime.combine(dt.date.today() + dt.timedelta(days=1),
+                                     target.time())
+        if night and not morning and target.hour < 12:
+            target = target.replace(hour=target.hour + 12)
+    else:
+        if night and not morning and target.hour < 12:
+            target = target.replace(hour=target.hour + 12)
+        if morning and target.hour == 12:
+            target = target.replace(hour=0)
+    return target
+
+
 def parse_event_when(text: str) -> tuple[Optional[dt.datetime], int]:
     """Resolve 'tomorrow at 9' / 'in 20 minutes' for calendar events."""
     seconds = parse_duration(text)
@@ -2932,11 +2965,7 @@ def parse_event_when(text: str) -> tuple[Optional[dt.datetime], int]:
 
 
 async def h_alarm_set(text: str, match, ctx: Context) -> Reply:
-    seconds = parse_duration(text)
-    if seconds:
-        target = dt.datetime.now() + dt.timedelta(seconds=seconds)
-    else:
-        target = parse_clock_target(text, allow_bare=True)
+    target = parse_when(text, allow_bare=True)
     if target is None:
         ctx.pending = {"kind": "alarm", "expires": time.monotonic() + ctx.settings.pending_ttl}
         return Reply("Alarm for what time?", intent="alarm.set")
@@ -2963,7 +2992,7 @@ async def h_reminder_set(text: str, match, ctx: Context) -> Reply:
         target = dt.datetime.now() + dt.timedelta(seconds=seconds)
         what = DURATION_RE.sub(" ", what).strip(" ,.")
     else:
-        target = parse_clock_target(text)
+        target = parse_when(text)
         if target is not None:
             what = re.sub(
                 r"\b(?:at|for|around|by)\s+\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)?\b",
@@ -4252,9 +4281,7 @@ class Router:
             await self.ctx.device.add_timer(seconds, str(label))
             return Reply(f"Timer set for {pretty_duration(seconds)}.", intent="timer.set")
         if kind == "alarm":
-            seconds = parse_duration(text)
-            target = (dt.datetime.now() + dt.timedelta(seconds=seconds) if seconds
-                      else parse_clock_target(text, allow_bare=True))
+            target = parse_when(text, allow_bare=True)
             if target is None:
                 return None
             wait = int((target - dt.datetime.now()).total_seconds())
@@ -4265,9 +4292,7 @@ class Router:
             await self.ctx.scheduler.add("alarm", target.timestamp(), label, "")
             return Reply(f"Alarm set for {target:%H:%M}.", intent="alarm.set")
         if kind == "reminder":
-            seconds = parse_duration(text)
-            target = (dt.datetime.now() + dt.timedelta(seconds=seconds) if seconds
-                      else parse_clock_target(text, allow_bare=True))
+            target = parse_when(text, allow_bare=True)
             if target is None:
                 return None
             what = str(pending.get("what") or "something")

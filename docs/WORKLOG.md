@@ -27,6 +27,20 @@ restart everything.
 
 ---
 
+## 2026-11-22 16:45 — alarm time parsing + WSL HF CLI path
+
+- Fixed alarm/reminder time parsing: new `parse_when()` honours tomorrow,
+  tonight, morning, night, `8am`/`8pm`/`8 pm` and bare times. Verified:
+  `tomorrow morning 8 am` → Mon 08:00, `tomorrow night 8 pm` → Mon 20:00,
+  `8pm` → today 20:00, `tomorrow night at 8` → Mon 20:00. Test alarms cancelled.
+- HF login is done from the **hub venv** using the `hf` CLI (installed
+  `huggingface_hub 2.4.0` there). In WSL bash use forward slashes:
+  `./.venv/Scripts/hf.exe auth login` (Windows backslashes are not a command).
+  The Pocket binary was copied to `tools/pocket-tts/pocket-tts.exe` so it no
+  longer lives in Temp.
+
+---
+
 ## 2026-11-22 16:30 — HF terms guide + ZONOS3-Mini research
 
 - Documented exact steps to accept the Hugging Face terms for Pocket TTS
