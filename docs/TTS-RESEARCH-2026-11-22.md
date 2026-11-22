@@ -133,6 +133,40 @@ and the GGUF download is roughly 1 GB. With only **~0.6 GB free RAM** on this PC
 right now, the ggml server would likely not fit alongside the hub, Whisper,
 Music Assistant and the WhatsApp bridge.
 
+## Follow-up: your KokoClone project (WSL) — implemented and tested
+
+Your notes pointed to `/home/olive/kokoclone/` in WSL. It is really there:
+`core/cloner.py`, `core/chunked_convert.py`, `app.py`, `olive_kokoro_wyoming.py`,
+`model/kokoro.onnx`, `voice/voices-v1.0.bin`, and the Kanade weights in the HF cache.
+
+The project's own `venv` is broken (its pip points at `/mnt/c/Users/Geggais and
+Rick/kokoclone/venv`, which is the **working** Linux venv). Correct interpreter:
+
+```
+/mnt/c/Users/Geggais and Rick/kokoclone/venv/bin/python
+```
+
+### Verified
+
+- **KokoClone cloning (Kokoro TTS + Kanade VC)** — generated a cloned WAV from
+  `test_input.wav`: `clone_olive_test.wav` (257 KB), copied to
+  `voice_refs/kokoclone_sample.wav` so you can listen to it.
+  Timing on CPU: **52 s** model load, **64 s** voice conversion, **153 s** total.
+  That is far too slow for a live reply, but excellent for one-time voice preparation.
+- **Kokoro Wyoming server** — `olive_kokoro_wyoming.py` now runs on port **10222**
+  (10220 is taken by a Windows service), reachable from Windows at
+  `127.0.0.1:10222`. Synthesized English (`af_bella`) and Italian (`im_nicola`)
+  successfully; first audio **7–14 s**, RTF 2.3–4.8 on this CPU. Valid PCM audio returned.
+
+### Wired into Olive
+
+- `start-kokoro-wyoming.ps1` starts the WSL service (idempotent).
+- The TTS router now receives `--kokoro-port 10222`.
+- Personas `KokoroEN` (`af_bella`) and `KokoroIT` (`im_nicola`) are registered and ready.
+- Your saved `ricky` clone is preserved (`ready: false`), so the hub honestly keeps
+  the normal voice until a fast cloning backend (Pocket TTS / ZONOS3-Mini) is available.
+  KokoClone can prepare a cloned WAV, but cannot serve live cloned speech at this speed.
+
 Recommendation unchanged: **Pocket TTS first** (small, tested, fast). Upgrade to
 ZONOS3-Mini when more RAM is available or when its 43-language coverage and
 ungated cloning justify the heavier setup. The hosted HF Space is useful for

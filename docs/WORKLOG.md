@@ -27,6 +27,24 @@ restart everything.
 
 ---
 
+## 2026-11-22 20:20 — KokoClone notes implemented and tested
+
+- Found the user's KokoClone project in WSL at `/home/olive/kokoclone`.
+  Working interpreter is `/mnt/c/Users/Geggais and Rick/kokoclone/venv/bin/python`
+  (the project-local venv is broken).
+- Verified Kanade+Kokoro cloning: generated `clone_olive_test.wav` from the
+  sample WAV in 153 s CPU (52 s load + 64 s conversion). Copied the result to
+  `voice_refs/kokoclone_sample.wav` for listening. Too slow for live replies.
+- Started the Kokoro Wyoming server on port 10222 (10220 is occupied by a
+  Windows service); verified English and Italian named voices from Windows with
+  valid PCM audio (7–14 s first audio, RTF 2.3–4.8 on this CPU).
+- Added `start-kokoro-wyoming.ps1`, `tools/kokoro/run_kokoro_wyoming.py`,
+  `--kokoro-port 10222` in the router, and registered `KokoroEN`/`KokoroIT`
+  personas. User's real `ricky` clone was preserved.
+- Research and numbers recorded in `TTS-RESEARCH-2026-11-22.md`.
+
+---
+
 ## 2026-11-22 17:45 — clone wake phrase ASR robustness
 
 - User's "Alexa clone" was heard as "Alexa cold"/"Alex Lacool" and routed to
