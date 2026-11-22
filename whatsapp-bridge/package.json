@@ -1,0 +1,15 @@
+{
+  "name": "olive-whatsapp-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local WhatsApp bridge for the Olive hub, using whatsapp-web.js",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "qrcode": "^1.5.4",
+    "whatsapp-web.js": "^1.26.0"
+  }
+}

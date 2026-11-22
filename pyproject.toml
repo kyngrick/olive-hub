@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "olive-assistant"
+version = "0.7.0"
+description = "Olive personal AI assistant with a direct LibreEcho voice bridge"
+requires-python = ">=3.11"
+dependencies = ["fastapi>=0.115,<1", "uvicorn[standard]>=0.30,<1", "httpx>=0.27,<1", "python-dotenv>=1,<2", "tzdata>=2024.1"]
+[project.optional-dependencies]
+test = ["pytest>=8,<9", "pytest-asyncio>=0.24"]
+[project.scripts]
+olive = "olive.__main__:main"
+[tool.setuptools.packages.find]
+where = ["src"]
+[tool.setuptools.package-data]
+olive = ["static/*"]

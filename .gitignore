@@ -1,0 +1,34 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.token
+run.cmd
+
+# Runtime state / personal data
+olive_memory.json
+olive_schedule.json
+shopping_list.json
+personal_facts.json
+iot_keys.json
+iot_devices.json
+iot_pending.json
+flight_search_cache.json
+music_catalog.json
+
+# WhatsApp bridge sessions and QR images
+whatsapp-bridge/session*/
+whatsapp-bridge/qr*.png
+whatsapp-bridge/bridge*.log
+whatsapp-bridge/debug*.log
+whatsapp-bridge/node_modules/
+
+# Logs and caches
+*.log
+*.err
+*.prev
+__pycache__/
+.pytest_cache/
+.venv/
+node_modules/
+*.py[cod]
