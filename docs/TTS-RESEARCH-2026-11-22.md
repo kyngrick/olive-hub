@@ -91,8 +91,9 @@ on the verified 10200 English path.
 5. On the PC, log the CLI in once:
    ```powershell
    .\.venv\Scripts\python.exe -m pip install -U huggingface_hub
-   .\.venv\Scripts\python.exe -m huggingface_hub login
-   # older installs: huggingface-cli login
+   .\.venv\Scripts\hf.exe auth login
+   # this project's hub venv already has huggingface_hub 2.4.0 installed.
+   # older installs may use: huggingface-cli login
    ```
    Paste the token when prompted. Alternatively set `HF_TOKEN=hf_...` in the
    environment of the process that runs Pocket TTS.
