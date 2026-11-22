@@ -76,7 +76,15 @@ The router change that reaches the WSL service takes effect on the next reboot.
 Current CPU speed gives first audio in ~8–14 seconds, so it is not yet suitable
 for quick conversational replies.
 
-## 5. If WSL address changes
+## 5. Checking the service
+
+Windows `netstat` will show **nothing** on 10222 because WSL localhost
+forwarding is off — that is normal. Check the WSL IP instead:
+```powershell
+Test-NetConnection -ComputerName 100.113.130.123 -Port 10222
+```
+
+If WSL address changes
 
 The client uses the WSL Tailscale IP in `.env`:
 ```
