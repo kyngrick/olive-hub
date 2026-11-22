@@ -27,6 +27,50 @@ restart everything.
 
 ---
 
+## 2026-11-22 15:40 — voice persona/clone framework (Kokoro research)
+
+- Researched Kokoro vs OmniVoice: Kokoro has fixed voices/blends (Italian
+  `if_sara`/`im_nicola`) but **cannot clone**; OmniVoice clones from 3–10 s
+  audio but needs ~4 GB models while this PC has ~0.9 GB free, so it cannot run
+  here. Documented both in `VOICE-CLONING.md`.
+- Built the full framework: ASR-proxy audio capture (`voice_refs/capture.wav`),
+  `voice_personas.py` registry, `clone` → record → "Who is this?" → save
+  persona, `speak like <name>` / `talk like <name>`, `list voices`, and
+  `use my normal voice`. TTS router reads the registry on every request and
+  overrides the voice (Piper now, Kokoro/OmniVoice slots ready on 10204/10203).
+- New TTS router on **10205** (old 10200 process is locked to another session);
+  `start-tts-detached.ps1` now uses `Start-Process` so args with spaces work;
+  watchdog and speaker TTS URI updated to 10205.
+- Verified: clone flow saved a persona from the test WAV; router override sent
+  an English request to `it_IT-serena-medium`. Test persona removed (it was not
+  the user's voice). 71 intents registered.
+- Docs: `VOICE-CLONING.md`; repo updated with new module/scripts.
+
+---
+
+## 2026-11-22 15:10 — portable speaker, WhatsApp Giulia 2, repo push
+
+- **Portable speaker research**: speaker is ARMv7 minimal Linux with no
+  package manager/root, so Tailscale cannot be installed on it. PC already has
+  Tailscale `100.108.79.37`; hub binds 0.0.0.0. Verified the speaker cannot
+  reach the tailnet from home WiFi, so a Tailscale **travel router** is required.
+  Added `switch-olive-endpoint.ps1` (updates assistant base_url + STT URI, keeps
+  voice settings) and `REMOTE-SPEAKER.md` with setup, firewall checklist and
+  what works/doesn't away from home. Tested the script with `-WhatIfOnly` and a
+  real LAN re-apply; config remains `192.168.1.86`.
+- **WhatsApp bridge moved to port 3013 with session3** after old processes on
+  3011/3012 became unkillable (other Windows session) and copied Chrome
+  profiles failed to reach web.whatsapp.com. Fresh headless session linked via
+  QR; watchdog and hub updated. Added contact dedup (duplicate rows share one
+  chat id).
+- **Test message sent**: `send a whatsapp msg to Giulia 2, saying tst amo love
+  ignore` → *"WhatsApp message sent to Giulia 2. It said: tst amo love ignore."*
+  Bridge counter 0 → 1.
+- GitHub repo `kyngrick/olive-hub` pushed again (`efbca65`) with the portable
+  guide and dedup fix.
+
+---
+
 ## 2026-11-22 14:00 — music ducking, WhatsApp polish, GitHub staging
 
 - **Music ducking for commands**: when the speaker opens the mic (ASR

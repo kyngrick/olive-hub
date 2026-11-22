@@ -81,6 +81,7 @@ set a timer for 5 minutes / remind me to call mum in 20 minutes
 add milk to my shopping list / tell me a joke / give me my morning briefing
 send a whatsapp msg to Julia, saying "hi baby have a good day!"
 whatsapp status / whatsapp contacts / scan for lights
+clone / speak like Ricky / use my normal voice / list voices
 ```
 
 `/health` lists all registered intents (68+).
@@ -122,6 +123,7 @@ immediately without waiting for the scheduler.
 - `docs/FEATURE-BUILD-2026-11-22.md` — routines, calendar, search, discovery, extras.
 - `docs/INTEGRATION-PLAN-2026-11-22.md` — flight APIs and WhatsApp bridge.
 - `docs/REMOTE-SPEAKER.md` — taking the speaker to another network (Tailscale).
+- `docs/VOICE-CLONING.md` — voice personas, Kokoro and OmniVoice cloning.
 - `docs/WORKLOG.md` — chronological build record.
 - `docs/architecture.md` — high-level architecture notes.
 

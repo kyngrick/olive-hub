@@ -13,6 +13,13 @@ $progress = 'C:\Users\Geggais and Rick\Documents\Codex\olive_assist_v2\restart-p
 $enVoice = 'en_GB-alan-medium'
 $itVoice = 'it_IT-serena-medium'
 if (-not (Test-Path $py)) { throw "piper venv not found: $py" }
+function Get-Env([string]$name) {
+  $p = 'C:\Users\Geggais and Rick\Documents\Codex\olive_assist_v2\.env'
+  foreach($l in Get-Content -LiteralPath $p){ if($l -match ('^'+[regex]::Escape($name)+'=(.*)$')){ return $Matches[1].Trim() } }
+  return ''
+}
+$routerPort = [int](Get-Env 'TTS_ROUTER_PORT')
+if ($routerPort -le 0) { $routerPort = 10200 }
 
 function Step([string]$message) {
     $line = '{0:yyyy-MM-dd HH:mm:ss}  tts: {1}' -f (Get-Date), $message
@@ -29,12 +36,10 @@ function Test-Listening([int]$port) {
 function Start-Detached([string]$name, [string[]]$arguments, [string]$logName) {
     $out = Join-Path $root "$logName.log"
     $err = Join-Path $root "$logName.err"
-    $inner = '"{0}" {1} >> "{2}" 2>> "{3}"' -f $py, ($arguments -join ' '), $out, $err
-    $result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
-        CommandLine      = 'cmd.exe /c "' + $inner + '"'
-        CurrentDirectory = $root
-    }
-    Step "started $name pid $($result.ProcessId)"
+    $result = Start-Process -FilePath $py -ArgumentList $arguments `
+      -WorkingDirectory $root -RedirectStandardOutput $out `
+      -RedirectStandardError $err -WindowStyle Hidden -PassThru
+    Step "started $name pid $($result.Id)"
 }
 
 if (-not (Test-Listening 10201)) {
@@ -51,16 +56,17 @@ if (-not (Test-Listening 10202)) {
     ) 'piper-it'
 } else { Step 'italian piper already listening' }
 
-if (-not (Test-Listening 10200)) {
+if (-not (Test-Listening $routerPort)) {
     Start-Detached 'TTS language router' @(
-        'wyoming_tts_lang_router.py','--host','0.0.0.0','--port','10200',
-        '--en-voice',$enVoice,'--it-voice',$itVoice
+        'wyoming_tts_lang_router.py','--host','0.0.0.0','--port',"$routerPort",
+        '--en-voice',$enVoice,'--it-voice',$itVoice,
+        '--persona-file','C:\Users\Geggais and Rick\Documents\Codex\olive_assist_v2\voice_personas.json'
     ) 'tts-router'
 } else { Step 'TTS router already listening' }
 
 $deadline = (Get-Date).AddSeconds(30)
 while ((Get-Date) -lt $deadline) {
-    if ((Test-Listening 10200) -and (Test-Listening 10201) -and (Test-Listening 10202)) {
+    if ((Test-Listening $routerPort) -and (Test-Listening 10201) -and (Test-Listening 10202)) {
         Step 'TTS stack ready'; exit 0
     }
     Start-Sleep -Seconds 1

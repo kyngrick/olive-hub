@@ -1,4 +1,4 @@
-# Olive hub watchdog: keep it running and apply a requested restart.
+﻿# Olive hub watchdog: keep it running and apply a requested restart.
 #
 # Safe to run every few minutes:
 #   * never kills or restarts a healthy hub unless a restart was requested
@@ -52,7 +52,7 @@ try {
     }
 
     # The speaker's TTS router (10200) and its two Piper backends need to be up.
-    if (-not (Test-Listening 10200)) {
+    if (-not (Test-Listening 10205)) {
         Write-Watchdog 'TTS stack is down; starting'
         $ttsOutput = & (Join-Path $root 'start-tts-detached.ps1') 2>&1 | Out-String
         if ($ttsOutput.Trim()) { Add-Content -Path $log -Value $ttsOutput.TrimEnd() -Encoding utf8 }
@@ -61,7 +61,7 @@ try {
 
     # WhatsApp bridge (needs a one-time QR scan by the user).
     # Keep this port in sync with WHATSAPP_BRIDGE_PORT / WHATSAPP_BRIDGE_URL in .env.
-    if (-not (Test-Listening 3012)) {
+    if (-not (Test-Listening 3013)) {
         Write-Watchdog 'WhatsApp bridge is down; starting'
         $waOutput = & (Join-Path $root 'start-whatsapp-bridge.ps1') 2>&1 | Out-String
         if ($waOutput.Trim()) { Add-Content -Path $log -Value $waOutput.TrimEnd() -Encoding utf8 }

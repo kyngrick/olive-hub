@@ -35,6 +35,8 @@ import subprocess
 import sys
 import time
 import webbrowser
+import wave
+import io
 import urllib.parse
 import uuid
 from dataclasses import dataclass, field
@@ -52,6 +54,7 @@ from extras import (ShoppingList, convert_currency as fx_convert,
 from web_helpers import flights_url as build_flights_url, youtube_url as resolve_youtube_url
 import flights_provider as flights
 import whatsapp as whatsapp_bridge
+import voice_personas as voices
 from iot_discover import (REPORT as IOT_REPORT, known_ips as iot_known_ips,
                          new_since, run_scan as iot_run_scan, stage as iot_stage)
 from messenger import send_telegram
@@ -2309,6 +2312,34 @@ MA_HINT = re.compile(
 _BACKGROUND: set[asyncio.Task] = set()
 _SCAN_STATE: dict[str, Any] = {"running": False, "last": 0.0, "new": 0, "error": ""}
 _SCAN_TASK: Optional[asyncio.Task] = None
+# Set by "clone" so the next utterance's Wyoming audio is saved as a reference.
+_VOICE_CAPTURE: dict[str, Any] = {"active": False, "chunks": [], "rate": 16000,
+                                   "width": 2, "channels": 1, "path": ""}
+
+
+def save_voice_capture() -> str:
+    """Write the captured Wyoming audio to a WAV file for a voice reference."""
+    cap = _VOICE_CAPTURE
+    if not cap.get("chunks"):
+        return ""
+    root = os.path.dirname(os.path.abspath(__file__))
+    refs = os.path.join(root, "voice_refs")
+    os.makedirs(refs, exist_ok=True)
+    path = os.path.join(refs, "capture.wav")
+    try:
+        with wave.open(path, "wb") as handle:
+            handle.setnchannels(int(cap.get("channels") or 1))
+            handle.setsampwidth(int(cap.get("width") or 2))
+            handle.setframerate(int(cap.get("rate") or 16000))
+            handle.writeframes(b"".join(cap["chunks"]))
+        cap["path"] = path
+        cap["chunks"] = []
+        log.info("voice reference captured: %s", path)
+        return path
+    except Exception as exc:
+        log.warning("voice capture save failed: %s", exc)
+        cap["chunks"] = []
+        return ""
 
 
 def background(coro: Awaitable[Any]) -> asyncio.Task:
@@ -3452,6 +3483,50 @@ async def h_whatsapp_contacts(text: str, match, ctx: Context) -> Reply:
                  intent="whatsapp.contacts")
 
 
+async def h_clone_start(text: str, match, ctx: Context) -> Reply:
+    _VOICE_CAPTURE.update(active=True, chunks=[], path="")
+    return Reply("Say a short sentence now, then I'll ask who it is.", intent="voice.clone")
+
+
+async def h_voice_use(text: str, match, ctx: Context) -> Reply:
+    groups = match.groupdict() if match else {}
+    name = str(groups.get("name") or re.sub(
+        r"^\s*(?:please\s+)?(?:speak|talk)\s+like\s+", "", text,
+        flags=re.IGNORECASE).strip(" .!?"))
+    if name.lower() in {"normal", "default", "off", "my normal voice", "your normal voice"}:
+        voices.set_active("")
+        return Reply("Back to my normal voice.", intent="voice.use")
+    personas = voices.all_personas()
+    key = " ".join(name.lower().split())
+    chosen = personas.get(key)
+    if chosen is None:
+        for candidate_key, candidate in personas.items():
+            if key in candidate_key or candidate_key in key:
+                chosen, key = candidate, candidate_key
+                break
+    if chosen is None:
+        return Reply(f"I don't have a voice called {name}. Say clone to create one.",
+                     intent="voice.use")
+    voices.set_active(key)
+    if chosen.get("ready"):
+        return Reply(f"Speaking like {chosen.get('name') or name}.", intent="voice.use")
+    return Reply(
+        f"Selected {chosen.get('name') or name}, but its {chosen.get('provider')} "
+        "backend isn't available here yet, so I'll keep the normal voice.",
+        intent="voice.use",
+    )
+
+
+async def h_voice_list(text: str, match, ctx: Context) -> Reply:
+    personas = voices.all_personas()
+    if not personas:
+        return Reply("No saved voices yet. Say clone to create one.", intent="voice.list")
+    active, _ = voices.active()
+    parts = [f"{p.get('name')}{' (active)' if k == active else ''}"
+             for k, p in personas.items()]
+    return Reply("Saved voices: " + ", ".join(parts) + ".", intent="voice.list")
+
+
 async def h_messenger(text: str, match, ctx: Context) -> Reply:
     body = None
     hit = re.search(r"\b(?:saying|that says|with the message)\s+(.+)$", text, re.IGNORECASE)
@@ -3663,6 +3738,17 @@ INTENTS: list[Intent] = [
     Intent("quote", compile_all(
         r"\b(?:quote of the day|give me a quote|tell me something inspiring)\b",
     ), h_quote),
+    Intent("voice.clone", compile_all(
+        r"^\s*(?:alexa\s+)?clone(?:\s+my\s+voice)?\s*$",
+        r"\bclone\s+my\s+voice\b",
+    ), h_clone_start),
+    Intent("voice.list", compile_all(
+        r"\b(?:list|show|what are)\s+(?:my\s+)?(?:voices|voice personas)\b",
+    ), h_voice_list),
+    Intent("voice.use", compile_all(
+        r"\b(?:speak|talk)\s+like\s+(?P<name>.+)$",
+        r"\buse\s+(?P<name>.+?)\s+voice\b",
+    ), h_voice_use),
     Intent("alarm.cancel", compile_all(r"\b(?:cancel|stop|delete|annulla|ferma)\b.*\balarms?\b",
                                        r"\balarms?\b.*\b(?:cancel|off|annulla)\b"), h_schedule_cancel),
     Intent("alarm.list", compile_all(
@@ -4221,6 +4307,34 @@ class Router:
             return await _wa_deliver(self.ctx,
                                      chosen.get("id") or chosen.get("number") or "",
                                      str(pending.get("body") or ""), wa_display(chosen))
+        if kind == "voice.name":
+            name = re.sub(r"\s+", " ", str(text or "")).strip(" .!?")
+            if not name or NEGATIVE.match(name):
+                return Reply("Okay, cancelled.", intent="voice.clone")
+            safe = re.sub(r"[^A-Za-z0-9 ]", "", name).strip()
+            slug = safe.lower().replace(" ", "_") or "voice"
+            ref_wav = str(pending.get("ref_wav") or "")
+            ref_text = str(pending.get("ref_text") or "")
+            if ref_wav and os.path.isfile(ref_wav):
+                refs = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voice_refs")
+                os.makedirs(refs, exist_ok=True)
+                wav_path = os.path.join(refs, slug + ".wav")
+                txt_path = os.path.join(refs, slug + ".txt")
+                with open(ref_wav, "rb") as src, open(wav_path, "wb") as dst:
+                    dst.write(src.read())
+                with open(txt_path, "w", encoding="utf-8") as handle:
+                    handle.write(ref_text)
+                ref_wav = wav_path
+            voices.add(name, ref_wav=ref_wav, ref_text=ref_text,
+                       provider="omnivoice", voice=name, tone="cloned from recording",
+                       ready=False)
+            voices.set_active(name)
+            return Reply(
+                f"Saved voice {name}. Say speak like {name} to use it. "
+                "Full cloning needs the OmniVoice backend, which this PC cannot "
+                "run yet, so I'll keep the normal voice for now.",
+                intent="voice.clone",
+            )
         return None
 
     async def route(self, text: str) -> Optional[Reply]:
@@ -4350,6 +4464,8 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
                 "scheduled_items": len(ctx.scheduler.items),
                 "scheduled_routines": len(ctx.scheduler.list("routine")),
                 "iot_scan": dict(_SCAN_STATE),
+                "voice": {"active": voices.active()[0],
+                          "personas": list(voices.all_personas())},
                 "whatsapp_bridge": await whatsapp_bridge.status(ctx.http),
                 "flights": flights.status(),
                 "pending": (ctx.pending or {}).get("kind"),
@@ -4580,6 +4696,18 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
             if state in ("announcing", "speaking"):
                 log.info("ignoring transcript while announcing: %r", text[:70])
                 return ""
+
+        # 0b. A pending clone capture: this transcript is the reference text.
+        if _VOICE_CAPTURE.get("path"):
+            ref_path = _VOICE_CAPTURE.pop("path")
+            ctx.pending = {
+                "kind": "voice.name",
+                "ref_wav": ref_path,
+                "ref_text": text.strip(),
+                "expires": time.monotonic() + ctx.settings.pending_ttl,
+            }
+            log.info("voice capture waiting for a name: %r", text[:60])
+            return "Who is this?"
 
         # 1. Wake word only (or nothing captured): stay in the conversation.
         if clean in WAKE_ONLY:
@@ -4908,6 +5036,10 @@ if WYOMING_AVAILABLE:
                         # The speaker opened its mic: lower music before the
                         # user speaks, without delaying the audio stream.
                         asyncio.create_task(self.duck_fn())
+                    if AudioStart.is_type(event.type) and _VOICE_CAPTURE["active"]:
+                        fmt = AudioStart.from_event(event)
+                        _VOICE_CAPTURE.update(chunks=[], rate=fmt.rate,
+                                              width=fmt.width, channels=fmt.channels)
                     if self.client is None and not self.upstream_failed:
                         self.client = AsyncTcpClient(
                             self.settings.whisper_host,
@@ -4926,10 +5058,15 @@ if WYOMING_AVAILABLE:
                     return True
 
                 if AudioChunk.is_type(event.type):
+                    if _VOICE_CAPTURE["active"] and len(_VOICE_CAPTURE["chunks"]) < 16000:
+                        _VOICE_CAPTURE["chunks"].append(AudioChunk.from_event(event).audio)
                     await self._safe_write(event)
                     return True
 
                 if AudioStop.is_type(event.type):
+                    if _VOICE_CAPTURE["active"]:
+                        _VOICE_CAPTURE["active"] = False
+                        save_voice_capture()
                     if self.client is None:
                         if not self.upstream_failed:
                             log.info("ASR audio stop without a Whisper connection")

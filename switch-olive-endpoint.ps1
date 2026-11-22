@@ -9,6 +9,7 @@ param(
   [Parameter(Mandatory=$true)][string]$Endpoint,
   [int]$Port = 8765,
   [int]$AsrPort = 10300,
+  [int]$TtsPort = 10200,
   [switch]$WhatIfOnly
 )
 $ErrorActionPreference='Stop'
@@ -60,7 +61,7 @@ $pipeline=@{
   mode='custom'
   stt_wyoming_uri=("tcp://{0}:{1}" -f $Endpoint,$AsrPort)
   stt_model=(Val $v.stt.model 'tiny-int8')
-  tts_wyoming_uri=(Val $v.tts.wyoming_uri 'tcp://127.0.0.1:10200')
+  tts_wyoming_uri=("tcp://{0}:{1}" -f $Endpoint,$TtsPort)
   tts_voice=(Val $v.tts.voice 'en_GB-alan-medium')
 }
 
@@ -68,6 +69,7 @@ if($WhatIfOnly){
   "WOULD SET assistant.base_url=$($assistant.base_url)"
   "model=[$($assistant.model)]"
   "WOULD SET stt_wyoming_uri=$($pipeline.stt_wyoming_uri)"
+  "WOULD SET tts_wyoming_uri=$($pipeline.tts_wyoming_uri)"
   exit 0
 }
 
