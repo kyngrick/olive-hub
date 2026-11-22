@@ -3514,7 +3514,20 @@ async def h_whatsapp_contacts(text: str, match, ctx: Context) -> Reply:
 
 async def h_clone_start(text: str, match, ctx: Context) -> Reply:
     _VOICE_CAPTURE.update(active=True, chunks=[], path="")
-    return Reply("Say a short sentence now, then I'll ask who it is.", intent="voice.clone")
+    return Reply("Clone mode armed. Say a short sentence — about five seconds — "
+                 "and I'll save your voice as a new persona.", intent="voice.clone")
+
+
+async def h_clone_status(text: str, match, ctx: Context) -> Reply:
+    if _VOICE_CAPTURE.get("active"):
+        return Reply("Clone mode is armed and waiting for your voice sample.",
+                     intent="voice.clone.status")
+    if _VOICE_CAPTURE.get("path"):
+        return Reply("Sample captured. Waiting for a name — who is this?",
+                     intent="voice.clone.status")
+    personas = voices.all_personas()
+    return Reply(f"Clone mode is idle. {len(personas)} saved voice(s). "
+                 "Say activate clone mode to begin.", intent="voice.clone.status")
 
 
 async def h_voice_use(text: str, match, ctx: Context) -> Reply:
@@ -3767,9 +3780,16 @@ INTENTS: list[Intent] = [
     Intent("quote", compile_all(
         r"\b(?:quote of the day|give me a quote|tell me something inspiring)\b",
     ), h_quote),
+    Intent("voice.clone.status", compile_all(
+        r"\b(?:clone|voice clone)\s+status\b",
+        r"^\s*clone\s+mode\s+status\s*$",
+    ), h_clone_status),
     Intent("voice.clone", compile_all(
         r"^\s*(?:alexa\s+)?clone(?:\s+my\s+voice)?\s*$",
+        r"^\s*(?:alexa\s+)?(?:activate|start|begin)\s+clone\s+mode\s*$",
+        r"^\s*(?:alexa\s+)?clone\s+mode\s*$",
         r"\bclone\s+my\s+voice\b",
+        r"\bstart\s+cloning\b",
     ), h_clone_start),
     Intent("voice.list", compile_all(
         r"\b(?:list|show|what are)\s+(?:my\s+)?(?:voices|voice personas)\b",
@@ -4490,7 +4510,10 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
                 "scheduled_routines": len(ctx.scheduler.list("routine")),
                 "iot_scan": dict(_SCAN_STATE),
                 "voice": {"active": voices.active()[0],
-                          "personas": list(voices.all_personas())},
+                          "personas": list(voices.all_personas()),
+                          "capture": {"armed": _VOICE_CAPTURE["active"],
+                                      "chunks": len(_VOICE_CAPTURE["chunks"]),
+                                      "sample_ready": bool(_VOICE_CAPTURE.get("path"))}},
                 "whatsapp_bridge": await whatsapp_bridge.status(ctx.http),
                 "flights": flights.status(),
                 "pending": (ctx.pending or {}).get("kind"),
@@ -4724,7 +4747,8 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
 
         # 0b. A pending clone capture: this transcript is the reference text.
         if _VOICE_CAPTURE.get("path"):
-            ref_path = _VOICE_CAPTURE.pop("path")
+            ref_path = _VOICE_CAPTURE.get("path") or ""
+            _VOICE_CAPTURE["path"] = ""
             ctx.pending = {
                 "kind": "voice.name",
                 "ref_wav": ref_path,

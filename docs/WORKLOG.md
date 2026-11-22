@@ -27,6 +27,22 @@ restart everything.
 
 ---
 
+## 2026-11-22 17:30 — clone mode built and tested; health KeyError fixed
+
+- Added `activate clone mode` / `clone mode` / `start cloning` phrases and a
+  `clone mode status` command. Clone mode now says *"Clone mode armed..."*,
+  captures the next Wyoming utterance, asks *"Who is this?"*, saves the persona
+  and can select it with `speak like <name>`.
+- Verified end-to-end with the test WAV: armed → capture → name → saved persona
+  → selected → cleaned up. Realistic pauses are needed because the echo guard
+  ignores speech while the device is still announcing.
+- Fixed a `/health` 500 caused by popping `_VOICE_CAPTURE["path"]`; now uses
+  `.get()` and resets the key instead of deleting it.
+- HUB_TOKEN in `.env` is still the original long token, not `echo play`; user
+  clarification pending.
+
+---
+
 ## 2026-11-22 16:45 — alarm time parsing + WSL HF CLI path
 
 - Fixed alarm/reminder time parsing: new `parse_when()` honours tomorrow,
