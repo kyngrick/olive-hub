@@ -77,3 +77,54 @@ for it — that is what broke speech when 10205 was tried. Instead:
 
 Nothing in this research changed the live speaker configuration; speech remains
 on the verified 10200 English path.
+
+## Follow-up: Hugging Face terms + ZONOS3-Mini
+
+### Accepting the Hugging Face terms (needed for Pocket TTS cloning)
+
+1. Sign in or create a free account at <https://huggingface.co>.
+2. Open the gated model page: <https://huggingface.co/kyutai/pocket-tts>.
+3. Read the terms and click **"Agree and access repository"** (sometimes shown
+   as *Request access*). Approval is normally immediate.
+4. Create a read-only token at <https://huggingface.co/settings/tokens>:
+   **New token → Read → Generate**.
+5. On the PC, log the CLI in once:
+   ```powershell
+   .\.venv\Scripts\python.exe -m pip install -U huggingface_hub
+   .\.venv\Scripts\python.exe -m huggingface_hub login
+   # older installs: huggingface-cli login
+   ```
+   Paste the token when prompted. Alternatively set `HF_TOKEN=hf_...` in the
+   environment of the process that runs Pocket TTS.
+6. Then `pocket-tts generate --voice <your.wav>` and `export-voice` work.
+
+Do not paste your HF token into chat. For unattended runs, store it in `.env`
+and have the launch script set it for the child process.
+
+### ZONOS3-Mini (Zyphra) — researched, not installed
+
+<https://huggingface.co/spaces/Zyphra/ZONOS3-Mini> and model
+`Zyphra/ZONOS3-Mini` are **public / not gated**, Apache-2.0 weights, MIT code.
+
+| Property | Value |
+|---|---|
+| Active parameters | ~100M (800M total latent MoE, 64 experts, top-2) |
+| Languages | **43**, including Italian, Japanese, English and most European/Asian languages |
+| Cloning | Raw reference clip (up to 60 s) **or** a 192-d speaker embedding; no transcript required |
+| Built-in voices | 27, including Italian `Ginevra` and `Lorenzo` |
+| Extras | Emotion/accent/pace steering, word-level emphasis, speech editing, streaming |
+| Backends | CUDA (Mini-SGLang), MLX (Apple), **C++/ggml CPU**, browser WebGPU |
+| Size | GGUF ~663 MB backbone + codec/encoder files; PyTorch weights ~9 GB; Space downloads ~10.5 GB |
+| License | Apache-2.0 weights, MIT runtime code |
+
+Verdict: **better in capability, not lighter** than Pocket TTS. It is more
+multilingual and ungated, but the local CPU route needs the ggml server built
+from source (Rust + CMake toolchain; Rust is present here, CMake is not on PATH)
+and the GGUF download is roughly 1 GB. With only **~0.6 GB free RAM** on this PC
+right now, the ggml server would likely not fit alongside the hub, Whisper,
+Music Assistant and the WhatsApp bridge.
+
+Recommendation unchanged: **Pocket TTS first** (small, tested, fast). Upgrade to
+ZONOS3-Mini when more RAM is available or when its 43-language coverage and
+ungated cloning justify the heavier setup. The hosted HF Space is useful for
+listening to voice quality but is not a low-latency local replacement.

@@ -27,6 +27,20 @@ restart everything.
 
 ---
 
+## 2026-11-22 16:30 — HF terms guide + ZONOS3-Mini research
+
+- Documented exact steps to accept the Hugging Face terms for Pocket TTS
+  cloning (agree on `kyutai/pocket-tts`, create a Read token, `hf auth login`).
+- Researched `Zyphra/ZONOS3-Mini`: public/ungated, Apache-2.0 weights, 43
+  languages incl. Italian/Japanese, ~100M active params, raw-clip or 192-d
+  embedding cloning, 27 built-in voices, emotion/accent steering, C++/ggml CPU
+  backend. GGUF ~663 MB backbone + codec; PyTorch ~9 GB; HF Space ~10.5 GB.
+- Verdict: more capable than Pocket TTS but **not lighter**; needs a ggml build
+  (Rust present, CMake not on PATH) and ~1 GB download. Only ~0.6 GB free RAM
+  here, so not installed. Speech config unchanged and verified on 10200.
+
+---
+
 ## 2026-11-22 16:10 — TTS candidate research (Pocket/Sopro/OpenVoice/etc.)
 
 - Researched Pocket TTS, Sopro, OpenVoice V2, KittenTTS 2, Hojo-TTS-Light and
