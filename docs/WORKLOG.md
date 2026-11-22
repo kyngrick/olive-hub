@@ -27,6 +27,20 @@ restart everything.
 
 ---
 
+## 2026-11-22 16:10 — TTS candidate research (Pocket/Sopro/OpenVoice/etc.)
+
+- Researched Pocket TTS, Sopro, OpenVoice V2, KittenTTS 2, Hojo-TTS-Light and
+  VoiceForge. Full comparison in `TTS-RESEARCH-2026-11-22.md`.
+- Downloaded the Pocket TTS standalone Windows binary (7.9 MB) and verified:
+  tiny EN model 16× real-time; Italian 100M model 1.29× real-time with correct
+  WAV output. Cloning is gated behind Hugging Face terms/login; built-in voices
+  work. `export-voice` to safetensors is available for reusable embeddings.
+- Recommendation: Pocket TTS first; Sopro only for English cloning; KittenTTS 2
+  Ternary best multilingual but needs ~6 GB RAM (unavailable now).
+- No live speaker/TTS config changes were made; speech stays on 10200.
+
+---
+
 ## 2026-11-22 15:50 — speech restored after 10205 firewall block
 
 - Speaker stopped speaking after TTS router moved to 10205: `ttsd` child exited

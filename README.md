@@ -124,6 +124,7 @@ immediately without waiting for the scheduler.
 - `docs/INTEGRATION-PLAN-2026-11-22.md` — flight APIs and WhatsApp bridge.
 - `docs/REMOTE-SPEAKER.md` — taking the speaker to another network (Tailscale).
 - `docs/VOICE-CLONING.md` — voice personas, Kokoro and OmniVoice cloning.
+- `docs/TTS-RESEARCH-2026-11-22.md` — Pocket TTS / Sopro / OpenVoice comparison.
 - `docs/WORKLOG.md` — chronological build record.
 - `docs/architecture.md` — high-level architecture notes.
 
