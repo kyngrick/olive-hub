@@ -27,6 +27,20 @@ restart everything.
 
 ---
 
+## 2026-11-22 21:20 — self-test scripts and WSL host fix
+
+- Added `tools/kokoro/test_kokoro.py`, `record_and_clone.py`, and
+  `kokoclone_generate.py` so the user can test Kokoro TTS and clone a voice.
+  Verified: Kokoro test writes `kokoro_en.wav` / `kokoro_it.wav` via WSL
+  Tailscale IP; clone wrapper generated `wrapper_test_cloned.wav` (178 s).
+- WSL localhost forwarding is off, so the router/client use the stable WSL
+  Tailscale IP `100.113.130.123` (`KOKORO_HOST` in `.env`); added `--kokoro-host`.
+- Wrote `HOWTO-TEST-VOICE.md` with exact commands and expected results.
+- Auto-playback in the clone script was changed to non-blocking `os.startfile`
+  after `sd.play/sd.wait` hung a headless session.
+
+---
+
 ## 2026-11-22 20:20 — KokoClone notes implemented and tested
 
 - Found the user's KokoClone project in WSL at `/home/olive/kokoclone`.

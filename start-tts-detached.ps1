@@ -1,4 +1,4 @@
-# Start the local TTS stack used by the LibreEcho speaker, detached.
+﻿# Start the local TTS stack used by the LibreEcho speaker, detached.
 #   :10201  Piper English (en_GB-alan-medium)
 #   :10202  Piper Italian  (it_IT-serena-medium)
 #   :10200  Wyoming language router the speaker actually talks to
@@ -60,7 +60,9 @@ if (-not (Test-Listening $routerPort)) {
     Start-Detached 'TTS language router' @(
         'wyoming_tts_lang_router.py','--host','0.0.0.0','--port',"$routerPort",
         '--en-voice',$enVoice,'--it-voice',$itVoice,
-        '--persona-file','C:\Users\Geggais and Rick\Documents\Codex\olive_assist_v2\voice_personas.json'
+        '--persona-file','C:\Users\Geggais and Rick\Documents\Codex\olive_assist_v2\voice_personas.json',
+        '--kokoro-port','10222',
+        '--kokoro-host',(Get-Env 'KOKORO_HOST')
     ) 'tts-router'
 } else { Step 'TTS router already listening' }
 
@@ -73,3 +75,5 @@ while ((Get-Date) -lt $deadline) {
 }
 Step 'TIMEOUT waiting for TTS ports; check piper-*.err / tts-router.err'
 exit 1
+
+
