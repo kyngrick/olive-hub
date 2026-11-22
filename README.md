@@ -121,6 +121,7 @@ immediately without waiting for the scheduler.
 - `docs/FINAL-AUDIT-2026-11-22.md` — reliability audit and fixes.
 - `docs/FEATURE-BUILD-2026-11-22.md` — routines, calendar, search, discovery, extras.
 - `docs/INTEGRATION-PLAN-2026-11-22.md` — flight APIs and WhatsApp bridge.
+- `docs/REMOTE-SPEAKER.md` — taking the speaker to another network (Tailscale).
 - `docs/WORKLOG.md` — chronological build record.
 - `docs/architecture.md` — high-level architecture notes.
 

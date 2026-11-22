@@ -47,7 +47,7 @@ const client = new Client({
     executablePath: CHROME,
     headless: process.env.BRIDGE_HEADLESS !== '0',
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
-           '--no-proxy-server', '--disable-features=DnsOverHttps'],
+           '--no-proxy-server'],
   },
 });
 

@@ -3395,6 +3395,15 @@ async def h_whatsapp_send(text: str, match, ctx: Context) -> Reply:
 
     result = await whatsapp_bridge.contacts(ctx.http, contact)
     matches = [c for c in (result.get("contacts") or []) if not c.get("isGroup")]
+    # WhatsApp often returns the same chat twice (saved contact + phone entry).
+    seen_ids: set[str] = set()
+    unique: list[dict] = []
+    for c in matches:
+        key = str(c.get("id") or c.get("number") or c.get("name") or "")
+        if key and key not in seen_ids:
+            seen_ids.add(key)
+            unique.append(c)
+    matches = unique
     needle = contact.lower()
     exact = [c for c in matches if str(c.get("name") or "").lower() == needle]
     candidates = exact or matches
