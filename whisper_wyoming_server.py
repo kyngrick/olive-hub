@@ -41,6 +41,15 @@ if "--model" in sys.argv:
 LANGUAGE = os.getenv("WHISPER_LANGUAGE", "") or None
 DOWNLOAD_ROOT = os.getenv("WHISPER_DOWNLOAD_ROOT", "")
 TIMEOUT = float(os.getenv("WHISPER_TIMEOUT", "30"))
+# Biases the small multilingual model toward Olive's command vocabulary.
+# The device always includes the wake word in the transcript.
+PROMPT = os.getenv("WHISPER_PROMPT", (
+    "Alexa, Olive, clone, clone mode, activate clone mode, timer, alarm, "
+    "reminder, weather, radio, music, YouTube, Netflix, kitchen light, "
+    "Giulia, Ricky, stop, volume. "
+    "Alexa, accendi, spegni, timer, sveglia, promemoria, meteo, radio, "
+    "musica, luce della cucina, ferma, volume."
+))
 
 
 def load_model():
@@ -145,6 +154,7 @@ class WhisperEventHandler(AsyncEventHandler):
                 fp16=False,
                 verbose=False,
                 condition_on_previous_text=False,
+                initial_prompt=PROMPT or None,
             )
             return str(result.get("text", "")).strip()
 

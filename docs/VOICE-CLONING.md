@@ -1,5 +1,18 @@
 # Voice personas, Kokoro and cloning
 
+## ASR robustness for the wake phrase
+
+Whisper `tiny` sometimes hears *"Alexa clone"* as *"Alexa cold"*, *"Alex
+Lacool"* or *"Alex recalled"*. Two fixes are in place:
+
+- the Whisper server passes an `initial_prompt` containing Olive's command
+  vocabulary (`clone`, `timer`, `weather`, `kitchen light`, `Giulia`, etc.);
+- `correct_clone_phrase()` in `olive_hub.py` maps short misheard wake phrases back
+  to `alexa clone`, and explicit aliases cover `cold`, `lacool`, `recalled`,
+  `clown`, `cone`. Ordinary phrases like *"it's cold outside"* are untouched.
+
+Verified via `/command`: all mishearings arm clone mode; the weather phrase does not.
+
 ## Current status / troubleshooting (15:50)
 
 The speaker briefly stopped speaking after the router was moved to port 10205:

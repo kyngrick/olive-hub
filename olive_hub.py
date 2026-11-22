@@ -2051,6 +2051,31 @@ _ITALIAN_HINTS = {
 }
 
 
+def correct_clone_phrase(text: str) -> str:
+    """Map common ASR mishearings of 'Alexa clone' back to the command.
+
+    The small Whisper model sometimes turns 'Alexa clone' into 'Alexa cold',
+    'Alex Lacool' or 'Alex recalled' depending on the voice. Only a short,
+    single-word command tail is rewritten, so 'it's cold' stays untouched.
+    """
+    raw = str(text or "").strip()
+    if re.match(r"^(?:alexa|alex)\b", raw, re.IGNORECASE) and "clone" in raw.lower():
+        return "alexa clone"
+    hit = re.match(r"^(?:alexa|alex|hey\s+olive)\s+([A-Za-z'-]{2,12})[ .!?]*$",
+                   raw, re.IGNORECASE)
+    if not hit:
+        return text
+    tail = hit.group(1)
+    if "clone" in tail.lower():
+        return "alexa clone"
+    for word in ("clone", "cloned", "cold", "clod", "clown", "cone", "clue",
+                 "recalled", "record", "recorded", "colt", "lacool", "cloan"):
+        if difflib.SequenceMatcher(None, tail.lower(), word).ratio() >= 0.6:
+            log.info("ASR correction: %r -> 'alexa clone'", raw)
+            return "alexa clone"
+    return text
+
+
 def _looks_italian(text: str) -> bool:
     words = set(re.findall(r"[a-zàèìòù]+", str(text or "").lower()))
     score = len(words & _ITALIAN_HINTS)
@@ -3790,6 +3815,8 @@ INTENTS: list[Intent] = [
         r"^\s*(?:alexa\s+)?clone\s+mode\s*$",
         r"\bclone\s+my\s+voice\b",
         r"\bstart\s+cloning\b",
+        # Whisper tiny can hear "clone" as "cold"/"clod" with some accents.
+        r"^\s*(?:alexa|hey\s+olive)\s+(?:cold|clod|clown|cone|cloned|cloan)\s*$",
     ), h_clone_start),
     Intent("voice.list", compile_all(
         r"\b(?:list|show|what are)\s+(?:my\s+)?(?:voices|voice personas)\b",
@@ -4385,6 +4412,7 @@ class Router:
     async def route(self, text: str) -> Optional[Reply]:
         if not text.strip():
             return None
+        text = correct_clone_phrase(text)
         clean = normalise(text)
         if FASTPATH_PREFIX in text:
             return Reply(text.split(FASTPATH_PREFIX, 1)[1].strip(), speak="pipeline", intent="fastpath")

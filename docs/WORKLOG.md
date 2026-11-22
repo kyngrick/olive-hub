@@ -27,6 +27,18 @@ restart everything.
 
 ---
 
+## 2026-11-22 17:45 — clone wake phrase ASR robustness
+
+- User's "Alexa clone" was heard as "Alexa cold"/"Alex Lacool" and routed to
+  the LLM ("I'm not sure what you mean"). Added Whisper `initial_prompt` with
+  Olive command vocabulary and `correct_clone_phrase()` fuzzy aliases in the
+  router. Verified `Alexa cold`, `Alex Lacool`, `Alex recalled`, `Alexa clone`
+  and `activate clone mode` all arm clone mode; `it's cold outside` does not.
+- Tested `base` Whisper against the same synthetic audio: no better ("Alex
+  recalled"), so the fast `tiny` model remains default.
+
+---
+
 ## 2026-11-22 17:30 — clone mode built and tested; health KeyError fixed
 
 - Added `activate clone mode` / `clone mode` / `start cloning` phrases and a
