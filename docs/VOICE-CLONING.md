@@ -1,5 +1,27 @@
 # Voice personas, Kokoro and cloning
 
+## Current status / troubleshooting (15:50)
+
+The speaker briefly stopped speaking after the router was moved to port 10205:
+its TTS child exited with code 1 because **Windows Firewall blocks inbound
+10205** (no allow rule; adding one requires admin). The speaker was restored to
+the known-good Wyoming TTS endpoint **tcp://192.168.1.86:10200** with voice
+`en_GB-alan-medium`, and speech is verified working again (`result=0`).
+
+`TTS_ROUTER_PORT` is set back to **10200** in `.env`, and the watchdog checks
+10200. The persona-capable router was launched by hand on 10205 to prove the
+override logic (an English request was routed to `it_IT-serena-medium`), but
+that port is not reachable from the speaker. After the next PC reboot, the
+watchdog will start the **persona-capable router on 10200**, so `speak like
+<name>` will then work automatically. Alternatively, an elevated PowerShell can
+add a firewall rule for 10205 and the speaker can be pointed back there with
+`switch-olive-endpoint.ps1 -Endpoint 192.168.1.86 -TtsPort 10205`.
+
+`clone` cannot create a real cloned voice yet: OmniVoice needs ~4 GB of models
+and this PC has ~0.9 GB free RAM. The capture/name/save flow works; the saved
+persona stays `ready: false` and the normal voice is used until that backend is
+available on a bigger machine.
+
 ## Short answer
 
 - **Kokoro is not a voice-cloning model.** It is a fast multilingual TTS (82M

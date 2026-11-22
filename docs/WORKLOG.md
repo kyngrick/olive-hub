@@ -27,6 +27,19 @@ restart everything.
 
 ---
 
+## 2026-11-22 15:50 — speech restored after 10205 firewall block
+
+- Speaker stopped speaking after TTS router moved to 10205: `ttsd` child exited
+  code 1; no requests reached either router. Cause: Windows Firewall has no
+  inbound allow rule for 10205 and adding one needs admin.
+- Restored speaker to `tcp://192.168.1.86:10200` + `en_GB-alan-medium`.
+  Verified announcement and "what time is it?" both speak again (`result=0`).
+- `.env TTS_ROUTER_PORT=10200` and watchdog check 10200 restored. The
+  persona-capable router will take over 10200 after the next reboot, so
+  `speak like` will then route correctly. Documented in `VOICE-CLONING.md`.
+
+---
+
 ## 2026-11-22 15:40 — voice persona/clone framework (Kokoro research)
 
 - Researched Kokoro vs OmniVoice: Kokoro has fixed voices/blends (Italian
