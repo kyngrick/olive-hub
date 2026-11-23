@@ -53,6 +53,7 @@ from places import Places
 from extras import (ShoppingList, convert_currency as fx_convert,
                     convert_units, joke as tell_joke, quote as daily_quote)
 from web_helpers import flights_url as build_flights_url, youtube_url as resolve_youtube_url
+import train_provider
 import flights_provider as flights
 import whatsapp as whatsapp_bridge
 import voice_personas as voices
@@ -3334,6 +3335,75 @@ async def h_flights(text: str, match, ctx: Context) -> Reply:
     )
 
 
+async def h_location(text: str, match, ctx: Context) -> Reply:
+    city = str(ctx.settings.city or "").strip()
+    lat, lon = ctx.settings.lat, ctx.settings.lon
+    if lat is None or lon is None:
+        return Reply("I don't have a configured location. Set WEATHER_LAT and "
+                     "WEATHER_LON in .env.", intent="location")
+    place = await train_provider.reverse(ctx.http, lat, lon)
+    near = place.get("name") or ""
+    country = place.get("country") or ""
+    bits = []
+    if near:
+        bits.append(f"near {near}")
+    elif city:
+        bits.append(f"near {city}")
+    if country and country != "IT":
+        bits.append(country)
+    where = " ".join(bits) or "at your configured home"
+    coords = f"{abs(lat):.2f} degrees {'north' if lat >= 0 else 'south'}, " \
+             f"{abs(lon):.2f} degrees {'east' if lon >= 0 else 'west'}"
+    home = f" Your home city is set to {city}." if city else ""
+    return Reply(f"You are {where}, around {coords}.{home}", intent="location")
+
+
+async def h_trains(text: str, match, ctx: Context) -> Reply:
+    parsed = train_provider.parse_request(text)
+    origin, destination = parsed["origin"], parsed["destination"]
+    if not origin or not destination:
+        return Reply("Tell me the departure and destination cities, for example "
+                     "trains from Rome to Milan tomorrow at eight.", intent="trains")
+
+    when = parsed["when"]
+    a, b = await asyncio.gather(
+        train_provider.geocode(ctx.http, origin),
+        train_provider.geocode(ctx.http, destination),
+    )
+    if not a or not b:
+        return Reply(f"I couldn't look up {origin} or {destination} on the map.",
+                     intent="trains")
+    trips = await train_provider.plan(ctx.http, a, b, when, count=3)
+    if not trips:
+        return Reply(f"No trains found from {a['name']} to {b['name']} "
+                     f"{'on that date' if when else 'today'}.", intent="trains")
+
+    day = ""
+    if when:
+        today = dt.date.today()
+        day = "Today " if when.date() == today else (
+            "Tomorrow " if when.date() == today + dt.timedelta(days=1)
+            else when.strftime("%A %d %B ") + "")
+    parts = []
+    for trip in trips[:2]:
+        train = trip["trains"].split(",")[0].strip()
+        change = "direct" if not trip["transfers"] else f"{trip['transfers']} change{'s' if trip['transfers'] > 1 else ''}"
+        parts.append(f"at {trip['depart']}, arriving {trip['arrive']}, "
+                     f"{trip['duration']}, {change}" +
+                     (f", {train}" if train else ""))
+    reply = f"{day}from {origin} to {destination}: " + "; ".join(parts) + "."
+    if not any(trip["prices"] for trip in trips):
+        reply += " The free timetable doesn't include ticket prices."
+        url = train_provider.price_url(origin, destination, when)
+        background(asyncio.to_thread(webbrowser.open, url))
+        reply += " I've opened a price check on the computer."
+    else:
+        prices = sorted({p for trip in trips for p in trip["prices"]})
+        if prices:
+            reply += f" Fares from {prices[0]:.0f}."
+    return Reply(reply, intent="trains")
+
+
 async def h_youtube(text: str, match, ctx: Context) -> Reply:
     # "Alexa, show me Al Jazeera live on YouTube", "play any Jamaican dancehall
     # music video" -> keep the useful search words, drop only the command shell.
@@ -4073,6 +4143,18 @@ INTENTS: list[Intent] = [
         r"\b(?:find|look for|search|show me|check)\b.*\bflights?\b",
         r"\bflights?\b.*\b(?:to|for|per)\b.*\b(?:rome|roma|next week|tomorrow)\b",
     ), h_flights),
+    Intent("location", compile_all(
+        r"\bwhat'?s?\s+(?:my|your|the)\s+(?:current\s+)?location\b",
+        r"\bwhere\s+(?:am\s+i|are\s+we|are\s+you)\b",
+        r"\bmy\s+(?:current\s+)?(?:location|position)\b",
+        r"\bqual'?\s*[èe]\s+la\s+mia\s+posizione\b",
+        r"\bdove\s+(?:siamo|sono)\b",
+    ), h_location),
+    Intent("trains", compile_all(
+        r"\btrains?\b",
+        r"\btrain\s+(?:times?|tickets?|costs?|prices?|fares?|schedule)\b",
+        r"\b(?:orari|treni|biglietti)\b.*\btren\b",
+    ), h_trains),
     Intent(
         "calendar.add",
         compile_all(

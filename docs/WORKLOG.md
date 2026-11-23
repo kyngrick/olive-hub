@@ -10,7 +10,8 @@ restart everything.
 
 | Item | Value |
 |---|---|
-| Hub | `olive_hub.py`, port **8765**, ASR proxy **10300** |
+| Hub | `olive_hub.py`, port **8765**, ASR proxy **10300**, 74 intents |
+| Location / trains | `train_provider.py` + Transitous free API; `location` and `trains` intents; Travel dashboard card |
 | Whisper ASR | `whisper_wyoming_server.py`, port **10301**, model `base` |
 | Speaker | `http://192.168.1.228:8080/api/v1` (LibreEcho OS 0.14.5; stable 0.14.6 available, see upgrade note) |
 | Dashboard | `http://127.0.0.1:8767/` — token-protected status/config/logs/intents/voice, customisable; voice picker, intent editor, wake/mic tuning, latency presets; watchdog auto-start |
@@ -27,6 +28,25 @@ restart everything.
 | Tuya cloud | **blocked**: project data center suspended (code 28841107) |
 | Start | `POST /restart` (daily), `.\\start-hub-detached.ps1`, or the scheduled task |
 | Logs | `olive_hub.err` (live), `olive_hub.err.prev` (previous run) |
+
+---
+
+## 2026-11-23 19:00 — location + train lookup
+
+- Researched free train APIs. Chose **Transitous** (open MOTIS 2 API, no key,
+  good EU/Trenitalia coverage, requires User-Agent + attribution). Rejected
+  unreachable DB endpoint, UK-only National Rail, scraping and paid APIs.
+- Added `train_provider.py`: geocode, reverse-geocode, journey plan with a real
+  departure time, date parsing (tomorrow / on 25 November / next Friday),
+  price-check link. Fixed wrong geocode hits (Rome→Paris, Milan→China).
+- Added hub intents `location` ("what's my location", "where am i", "dove siamo")
+  and `trains` ("check trains … from X to Y …") with spoken replies; added
+  Travel / location dashboard card with a timetable table and price link.
+- Verified: location replies correctly; Rome→Milan tomorrow 08:00 returns 07:01
+  and 07:03 Frecciarossa options; 9/9 services, 74 intents. Full notes:
+  `LOCATION-AND-TRAINS-2026-11-23.md`.
+- Cost caveat: open feeds publish times, not ticket prices; Olive says so and
+  opens a real price search instead of guessing.
 
 ---
 

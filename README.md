@@ -124,6 +124,12 @@ See `docs/TV-AND-ALARMS-2026-11-23.md`, including why LibreEcho 0.14.5's local
 timer parser can answer "Timer for how long?" to an alarm request and which
 phrasing reliably reaches the hub.
 
+Ask "Alexa, what's my location" for the configured home position, or "check
+trains from Rome to Milan tomorrow at 8" for real times from the free Transitous
+API (prices are not published in open feeds, so a price-check link is opened
+instead). The dashboard's **Travel / location** card shows the same data.
+See `docs/LOCATION-AND-TRAINS-2026-11-23.md`.
+
 Use **Customize** to change the theme, accent colour, which cards are visible,
 their order, the refresh interval and the quick-command text; preferences are
 saved in the browser. The **Configuration** card can edit non-secret `.env`

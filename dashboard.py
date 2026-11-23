@@ -29,6 +29,7 @@ from aiohttp import web
 from dotenv import load_dotenv
 
 import voice_manager
+import train_provider
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
@@ -464,6 +465,44 @@ async def api_latency(_request: web.Request) -> web.Response:
     return web.json_response(out)
 
 
+# ---- location & trains ------------------------------------------------
+async def api_location(_request: web.Request) -> web.Response:
+    env = _env_lines()
+    try:
+        lat = float(env.get("WEATHER_LAT") or 0)
+        lon = float(env.get("WEATHER_LON") or 0)
+    except ValueError:
+        return web.json_response({"ok": False, "error": "invalid WEATHER_LAT/LON"}, status=400)
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        place = await train_provider.reverse(session, lat, lon)
+    return web.json_response({"ok": True, "lat": lat, "lon": lon,
+                              "city": env.get("OLIVE_CITY", ""), "place": place})
+
+
+async def api_trains(request: web.Request) -> web.Response:
+    text = request.query.get("text", "")
+    parsed = train_provider.parse_request(text)
+    if not parsed["origin"] or not parsed["destination"]:
+        return web.json_response({"ok": False,
+                                  "error": "say: trains from Rome to Milan tomorrow at 8"})
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        a, b = await asyncio.gather(
+            train_provider.geocode(session, parsed["origin"]),
+            train_provider.geocode(session, parsed["destination"]),
+        )
+        if not a or not b:
+            return web.json_response({"ok": False, "error": "could not geocode the cities"}, status=502)
+        trips = await train_provider.plan(session, a, b, parsed["when"], count=5)
+    return web.json_response({"ok": True, "origin": parsed["origin"],
+                              "destination": parsed["destination"],
+                              "when": parsed["when"].isoformat() if parsed["when"] else "",
+                              "from": a, "to": b, "trips": trips,
+                              "price_url": train_provider.price_url(
+                                  parsed["origin"], parsed["destination"], parsed["when"])})
+
+
 # ---- performance presets ---------------------------------------------
 async def api_performance(_request: web.Request) -> web.Response:
     """Apply a latency/quality preset to LLM settings in .env."""
@@ -528,6 +567,8 @@ def make_app() -> web.Application:
     app.router.add_post("/api/speaker", api_speaker_set)
     app.router.add_post("/api/latency", api_latency)
     app.router.add_post("/api/performance", api_performance)
+    app.router.add_get("/api/location", api_location)
+    app.router.add_get("/api/trains", api_trains)
     app.router.add_post("/api/restart", api_restart)
     return app
 
@@ -617,6 +658,11 @@ button{cursor:pointer}button:hover{border-color:var(--accent)}button.mini{paddin
 <div class="bar" style="margin:8px 0"><button class="mini" onclick="applyPreset('fast')">Fast</button><button class="mini" onclick="applyPreset('balanced')">Balanced</button><button class="mini" onclick="applyPreset('quality')">Quality</button><button class="mini" onclick="runLatency()">Measure now</button></div>
 <div id="perfmsg" class="err"></div>
 <p class="note">Fast uses <b>qwen/qwen3.8-27b</b> (non-reasoning, multilingual, 0.3–0.8 s; good English and Italian). Quality uses gpt-oss-120b with thinking. Restart the hub after switching.</p></div>
+<div class="card" id="card-travel" style="grid-column:1/-1"><h2>Travel / location</h2>
+<div id="locationinfo" class="dim">location…</div>
+<div class="rowline" style="margin-top:8px"><input id="trainq" placeholder="trains from Rome to Milan tomorrow at 8" style="flex:1">
+<button class="mini" onclick="checkTrains()">Check trains</button><button class="mini" onclick="loadLocation()">Location</button></div>
+<div id="trainresult"></div></div>
 <div class="card" id="card-config" style="grid-column:1/-1"><h2>Configuration (.env, secrets redacted)</h2>
 <div class="cfgsave"><input id="cfgkey" placeholder="KEY"><input id="cfgval" placeholder="new value"><button class="mini" onclick="saveConfig()">Save value</button></div>
 <div id="cfgerr" class="err"></div>
@@ -630,8 +676,8 @@ button{cursor:pointer}button:hover{border-color:var(--accent)}button.mini{paddin
 
 <script>
 const DEFAULT_COMMANDS = ".\\.venv\\Scripts\\python.exe tools\\kokoro\\test_kokoro.py\n.\\.venv\\Scripts\\python.exe tools\\kokoro\\record_and_clone.py --name Ricky\n\nAlexa clone → sample → \"Who is this?\" → \"Ricky\"\nAlexa speak like KokoroIT / KokoroEN";
-const CARD_NAMES = {services:'Hub / services',features:'LLM / features',voice:'Voice',voicesel:'Voice picker',intents:'Intents',intentedit:'Intent editor',speaker:'Wake / mic',perf:'Performance',config:'Configuration',logs:'Logs',quick:'Quick commands',libreecho:'LibreEcho upgrade'};
-const DEFAULT_ORDER = ['services','features','voice','voicesel','intents','intentedit','speaker','perf','config','logs','quick','libreecho'];
+const CARD_NAMES = {services:'Hub / services',features:'LLM / features',voice:'Voice',voicesel:'Voice picker',intents:'Intents',intentedit:'Intent editor',speaker:'Wake / mic',perf:'Performance',travel:'Travel / location',config:'Configuration',logs:'Logs',quick:'Quick commands',libreecho:'LibreEcho upgrade'};
+const DEFAULT_ORDER = ['services','features','voice','voicesel','intents','intentedit','speaker','perf','travel','config','logs','quick','libreecho'];
 const DEFAULTS = {theme:'midnight',accent:'#58a6ff',interval:5,commands:DEFAULT_COMMANDS,
   show:Object.fromEntries(DEFAULT_ORDER.map(k=>[k,true])), order:DEFAULT_ORDER.slice()};
 const THEMES = {midnight:{bg:'#0d1117',card:'#161b22',fg:'#c9d1d9'},ocean:{bg:'#071a2b',card:'#0f2942',fg:'#d6e9ff'},light:{bg:'#f6f8fa',card:'#ffffff',fg:'#1f2328'},forest:{bg:'#0b1712',card:'#13251c',fg:'#d8f3e2'}};
@@ -705,7 +751,7 @@ async function login(e){
   const tok=document.getElementById('token').value.trim();
   if(!tok){showLogin('Enter the token first.');return;}
   T=tok;showLogin('Checking token…');
-  try{DATA=await api('/api/summary');sessionStorage.setItem('olive_token',T);hideLogin();render();await loadLogs();loadVoices();loadIntents();loadSpeaker();}
+  try{DATA=await api('/api/summary');sessionStorage.setItem('olive_token',T);hideLogin();render();await loadLogs();loadVoices();loadIntents();loadSpeaker();loadLocation();}
   catch(err){T='';sessionStorage.removeItem('olive_token');showLogin('Token rejected. Check HUB_TOKEN in .env ('+err.message+').');}
 }
 async function localLogin(){
@@ -842,6 +888,30 @@ async function applySpeaker(){
     if(r.ok)loadSpeaker();
   }catch(e){document.getElementById('speakererr').textContent='Failed: '+e.message;}
 }
+// ---- travel / location ----
+async function loadLocation(){
+  try{const d=await api('/api/location');
+    document.getElementById('locationinfo').textContent=d.ok
+      ? ('Home: '+d.city+' · '+d.lat.toFixed(2)+', '+d.lon.toFixed(2)+' · nearest: '+(d.place.name||'unknown'))
+      : ('Location error: '+d.error);
+  }catch(e){document.getElementById('locationinfo').textContent=e.message;}
+}
+async function checkTrains(){
+  const q=document.getElementById('trainq').value.trim(), box=document.getElementById('trainresult');
+  if(!q){box.textContent='Enter a journey.';return;}
+  box.textContent='Looking up…';
+  try{
+    const d=await api('/api/trains?text='+encodeURIComponent(q));
+    if(!d.ok){box.innerHTML='<span class="bad">'+esc(d.error)+'</span>';return;}
+    const rows=(d.trips||[]).map(t=>'<tr><td>'+esc(t.depart)+'</td><td>'+esc(t.arrive)+'</td><td>'+esc(t.duration)+
+      '</td><td>'+t.transfers+' change'+(t.transfers===1?'':'s')+'</td><td>'+esc(t.trains)+'</td></tr>').join('');
+    box.innerHTML='<p class="dim">'+esc(d.origin)+' → '+esc(d.destination)+(d.when?' · '+esc(d.when.slice(0,16).replace('T',' ')):'')+
+      '</p><table><tr><th>Depart</th><th>Arrive</th><th>Duration</th><th>Changes</th><th>Train</th></tr>'+rows+'</table>'+
+      '<p class="note">Ticket prices are not published in the free timetable. '+
+      '<a href="'+esc(d.price_url)+'" target="_blank" rel="noopener">Check prices</a> · '+
+      'Timetable data: <a href="https://transitous.org/sources/" target="_blank" rel="noopener">Transitous sources</a></p>';
+  }catch(e){box.innerHTML='<span class="bad">'+esc(e.message)+'</span>';}
+}
 // ---- performance ----
 async function applyPreset(name){
   if(!confirm('Apply "'+name+'" LLM preset? Restart the hub afterwards.'))return;
@@ -885,7 +955,7 @@ document.getElementById('logname').onchange=loadLogs;
 applyPrefs();
 if(T){
   showLogin('Checking saved token…');
-  api('/api/summary').then(d=>{DATA=d;hideLogin();render();loadLogs();loadVoices();loadIntents();loadSpeaker();})
+  api('/api/summary').then(d=>{DATA=d;hideLogin();render();loadLogs();loadVoices();loadIntents();loadSpeaker();loadLocation();})
     .catch(()=>{T='';sessionStorage.removeItem('olive_token');showLogin('Saved token was rejected. Check HUB_TOKEN in .env.');});
 }else showLogin();
 </script></body></html>"""
