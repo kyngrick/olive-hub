@@ -28,6 +28,25 @@ restart everything.
 
 ---
 
+## 2026-11-23 12:45 — WhatsApp bridge stuck (observation only)
+
+- `GET /health` reports `whatsapp_bridge.status = "starting"` with
+  `lastError: "The browser is already running for ...session4\\session-olive-hub"`.
+  Port 3014 is listening but the bridge client never initialised (QR png is
+  from 22 Nov). No Chrome process is visibly attached to that profile now, so
+  the lock error is stale.
+- The bridge `node.exe` PID 27540 is owned by a protected account; both
+  `taskkill /F` and `Stop-Process -Force` returned **Access denied** from the
+  interactive shell, so it could not be restarted here. The watchdog will not
+  restart it while port 3014 is listening.
+- Manual fix when convenient: from an **elevated** PowerShell,
+  `Stop-Process -Id 27540 -Force`, then run
+  `.\\start-whatsapp-bridge.ps1`, then check `GET /health` for
+  `whatsapp_bridge.status = "ready"` (or `qr` if a re-scan is needed).
+- This is unrelated to the dashboard/LibreEcho work and was not performed.
+
+---
+
 ## 2026-11-23 12:25 — dashboard login fix, customisation, config editor, LibreEcho research
 
 - Fixed the login overlay: a rejected/stale token now shows a clear inline error
