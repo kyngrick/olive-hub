@@ -78,6 +78,17 @@ Start-Sleep -Seconds 8
 if (Test-Path $err) { Get-Content $err -Tail 8 | ForEach-Object { Step "  $_" } }
 
 # The speaker sends audio to 10300, which forwards to Whisper on 10301.
+# Recycle it so a changed WHISPER_PROMPT / model is picked up on hub restart.
+$whisperPid = $null
+foreach ($row in (& netstat.exe -ano -p TCP 2>$null | Select-String 'LISTENING\s+\d+\s*$')) {
+    $parts = ($row.Line -split '\s+') | Where-Object { $_ }
+    if ($parts.Count -ge 5 -and $parts[1] -match ':10301$') { $whisperPid = $parts[-1]; break }
+}
+if ($whisperPid) {
+    Step "stopping whisper pid $whisperPid"
+    & taskkill.exe /F /PID $whisperPid 2>&1 | ForEach-Object { Step "  $_" }
+    Start-Sleep -Seconds 2
+}
 $asr = & (Join-Path $root 'start-whisper-detached.ps1') 2>&1 | Out-String
 if ($asr.Trim()) { $asr.TrimEnd() -split "`r?`n" | ForEach-Object { Step "  $_" } }
 

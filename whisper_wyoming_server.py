@@ -48,7 +48,10 @@ PROMPT = os.getenv("WHISPER_PROMPT", (
     "reminder, weather, radio, music, YouTube, Netflix, kitchen light, "
     "Giulia, Ricky, stop, volume. "
     "Alexa, accendi, spegni, timer, sveglia, promemoria, meteo, radio, "
-    "musica, luce della cucina, ferma, volume."
+    "musica, luce della cucina, ferma, volume. "
+    "Set alarm for tomorrow at 8 am. Wake me up at 7 tomorrow morning. "
+    "Set an alarm for 6 pm. Play Al Jazeera live on YouTube. "
+    "Play any Jamaican dancehall music video on YouTube. Turn on the TV."
 ))
 
 

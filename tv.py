@@ -13,9 +13,14 @@ stalls while mDNS discovery or ``adb`` runs.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import re
 import shutil
+import socket
+import struct
+import subprocess
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -455,11 +460,18 @@ class TvControl:
             return False, "adb is not installed on this PC."
         if not target:
             return False, "I don't know the TV's IP address."
-        await asyncio.to_thread(self._adb_sync, binary, "connect", target)
-        code, out = await self._adb("get-state", host=host, timeout=8)
-        state = out.strip().splitlines()[-1] if out.strip() else "unknown"
+        # "adb connect" can report success while get-state briefly still says
+        # "device not found". Retry a couple of times before giving up.
+        for attempt in range(3):
+            await asyncio.to_thread(self._adb_sync, binary, "connect", target)
+            code, out = await self._adb("get-state", host=host, timeout=8)
+            state = out.strip().splitlines()[-1] if out.strip() else "unknown"
+            if state.startswith("device"):
+                break
+            await asyncio.sleep(1 + attempt)
         if state.startswith("device"):
             self._adb_ready = True
+            self._learn_mac(host)
             return True, ""
         self._adb_ready = False
         if "unauthorized" in state:
@@ -544,32 +556,140 @@ class TvControl:
             return TvResult(False, f"The TV rejected the command: {out[:80]}")
         return TvResult(True, f"Sent {key} to the TV.")
 
-    async def power_on(self) -> TvResult:
+    # -- Wake-on-LAN --------------------------------------------------
+    def _mac_file(self) -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "tv_mac.json")
+
+    def _learn_mac(self, host: str = "") -> None:
+        """Remember the TV's MAC while it is on, so WoL works when it is off."""
+        if not host:
+            return
+        try:
+            with open(self._mac_file(), encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception:
+            data = {}
+        if data.get(host):
+            return
+        mac = ""
+        binary = self.adb_path()
+        for iface in ("eth0", "wlan0"):
+            out = self._adb_sync(binary, "shell",
+                                 f"cat /sys/class/net/{iface}/address") if binary else ""
+            if re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", out.strip(), re.I):
+                mac = out.strip().lower()
+                break
+        if not mac:
+            try:
+                arp = subprocess.run(["arp", "-a", host], capture_output=True, text=True,
+                                     timeout=8, errors="replace").stdout
+                hit = re.search(r"([0-9a-fA-F]{2}[-:]){5}[0-9a-fA-F]{2}", arp)
+                if hit:
+                    mac = hit.group(0).replace("-", ":").lower()
+            except Exception:
+                pass
+        if mac:
+            data[host] = mac
+            try:
+                with open(self._mac_file(), "w", encoding="utf-8") as handle:
+                    json.dump(data, handle, indent=2)
+                log.info("tv: learned MAC %s for %s", mac, host)
+            except Exception as exc:
+                log.debug("tv MAC save failed: %s", exc)
+
+    def _known_mac(self, host: str = "") -> str:
+        configured = (getattr(self.settings, "tv_mac", "") or "").strip()
+        if configured:
+            return configured.lower()
+        try:
+            with open(self._mac_file(), encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception:
+            return ""
+        return str(data.get(host) or "").lower()
+
+    async def wake_on_lan(self) -> TvResult:
+        """Send a magic packet. Needs TV_MAC or a previously learned MAC."""
+        host = await self._adb_host_for_cast()
+        mac = self._known_mac(host)
+        if not mac or not re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", mac, re.I):
+            return TvResult(False, "I don't know the TV's MAC address. Turn the TV on once "
+                                   "and I can learn it, or set TV_MAC in .env.")
+        packet = b"\xff" * 6 + bytes.fromhex(mac.replace(":", "")) * 16
+        sent = False
+        targets = ["255.255.255.255"]
+        if host:
+            targets.append(host)
+        for target in targets:
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                sock.sendto(packet, (target, 9))
+                sock.close()
+                sent = True
+            except Exception as exc:
+                log.debug("WoL send to %s failed: %s", target, exc)
+        if not sent:
+            return TvResult(False, "I couldn't send the wake packet.")
+        log.info("tv: sent Wake-on-LAN for %s", mac)
+        return TvResult(True, f"Sent a wake signal to the TV ({mac}).")
+
+    async def _wait_awake(self, seconds: float = 25.0) -> bool:
+        """Poll ADB until the TV has finished booting after a wake signal."""
+        host = await self._adb_host_for_cast()
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            code, out = await self._adb("get-state", host=host, timeout=5)
+            if code == 0 and out.strip().splitlines()[-1].startswith("device"):
+                return True
+            await asyncio.sleep(2)
+        return False
+
+    async def ensure_awake(self) -> TvResult:
+        """Make sure the TV is reachable, waking it with ADB/WoL/CEC if needed."""
         host = await self._adb_host_for_cast()
         if host:
-            ok, problem = await self._adb_connect(host)
+            ok, _problem = await self._adb_connect(host)
             if ok:
-                code, out = await self._adb("shell", "input", "keyevent",
-                                            str(KEYCODES["wake"]), host=host)
-                if code == 0:
-                    return TvResult(True, "Turned on the TV.")
-                # Some boxes ignore WAKE; POWER toggles.
-                code, out = await self._adb("shell", "input", "keyevent",
-                                            str(KEYCODES["power"]), host=host)
-                if code == 0:
-                    return TvResult(True, "Turned on the TV.")
-                log.warning("tv power on failed: %s", out)
+                return TvResult(True, "TV is on.")
+        wol = await self.wake_on_lan()
+        if wol.ok and await self._wait_awake():
+            return TvResult(True, "TV woke up.")
         result = await self.wake()
         if result.ok:
             return result
-        return TvResult(False, "I couldn't turn on the TV: no Chromecast responded and "
-                               "debugging is not reachable.")
+        if wol.ok:
+            return TvResult(False, "I sent the wake signal but the TV did not come online. "
+                                   "Some TVs only support Wake-on-LAN over Ethernet.")
+        return TvResult(False, "I couldn't wake the TV. Turn it on once so I can learn its "
+                               "MAC, or set TV_MAC in .env.")
+
+    async def power_on(self) -> TvResult:
+        host = await self._adb_host_for_cast()
+        if host:
+            ok, _problem = await self._adb_connect(host)
+            if ok:
+                code, _out = await self._adb("shell", "input", "keyevent",
+                                             str(KEYCODES["wake"]), host=host)
+                if code == 0:
+                    return TvResult(True, "Turned on the TV.")
+                # Some boxes ignore WAKE; POWER toggles.
+                code, _out = await self._adb("shell", "input", "keyevent",
+                                             str(KEYCODES["power"]), host=host)
+                if code == 0:
+                    return TvResult(True, "Turned on the TV.")
+        return await self.ensure_awake()
 
     async def power_off(self) -> TvResult:
         host = await self._adb_host_for_cast()
         if host:
-            ok, problem = await self._adb_connect(host)
-            if ok:
+            for attempt in range(3):
+                ok, problem = await self._adb_connect(host)
+                if not ok:
+                    if "authorise" in problem:
+                        return TvResult(False, problem)
+                    await asyncio.sleep(1 + attempt)
+                    continue
                 code, out = await self._adb("shell", "input", "keyevent",
                                             str(KEYCODES["sleep"]), host=host)
                 if code == 0:
@@ -579,8 +699,6 @@ class TvControl:
                 if code == 0:
                     return TvResult(True, "Turned off the TV.")
                 log.warning("tv power off failed: %s", out)
-            elif "authorise" in problem:
-                return TvResult(False, problem)
         return TvResult(False, "I can't turn the TV off without debugging access.")
 
     async def launch(self, app: str) -> TvResult:
@@ -599,11 +717,20 @@ class TvControl:
         return TvResult(True, f"Opening {app.title()}.")
 
     async def adb_view_url(self, url: str, package: str = "") -> TvResult:
-        """Open a URL in a native Android TV app via an explicit VIEW intent."""
+        """Open a URL in a native Android TV app via an explicit VIEW intent.
+
+        Wakes the TV first if ADB is unreachable, so media commands work even
+        when the screen is off.
+        """
         host = await self._adb_host_for_cast()
         ok, problem = await self._adb_connect(host)
         if not ok:
-            return TvResult(False, problem)
+            awake = await self.ensure_awake()
+            if not awake.ok:
+                return awake
+            ok, problem = await self._adb_connect(host)
+            if not ok:
+                return TvResult(False, problem)
         # adb's remote shell joins argv with spaces; quote the URL so '&' and
         # '?' inside it do not become shell separators on the TV.
         args = ["shell", "am", "start", "-a", "android.intent.action.VIEW",

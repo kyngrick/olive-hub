@@ -20,13 +20,36 @@ restart everything.
 | LLM | Groq `openai/gpt-oss-120b`, fallback `openai/gpt-oss-20b` |
 | Music | named stations via Music Assistant (`RADIO_PREFER_MA=1`), native fallback |
 | Memory | `olive_memory.json` — facts + notes + topics (only `birthday` today) |
-| TV | Bedroom TV `192.168.1.41`, Chromecast + ADB (debugging enabled 19 Nov) |
+| TV | Bedroom TV `192.168.1.41`, Chromecast + ADB; MAC `ec:9c:32:72:9a:67` learned for Wake-on-LAN; full YouTube control |
 | Local IoT | `iot.py` + `iot_keys.json` — **1 active**: kitchen light `192.168.1.179` |
 | Key helper | `tuya-local-key` container on `127.0.0.1:8010` (QR login, no paid project) |
 | Auto-start | Task **Olive Hub** S4U/Limited — logon + 5-minute watchdog; `POST /restart` for reloads |
 | Tuya cloud | **blocked**: project data center suspended (code 28841107) |
 | Start | `POST /restart` (daily), `.\\start-hub-detached.ps1`, or the scheduled task |
 | Logs | `olive_hub.err` (live), `olive_hub.err.prev` (previous run) |
+
+---
+
+## 2026-11-23 18:00 — full TV control, YouTube playback, alarm misroute
+
+- TV: added Wake-on-LAN with auto-learned MAC (`tv_mac.json`, learned
+  `ec:9c:32:72:9a:67`), `ensure_awake()` used by YouTube so media commands work
+  with the screen off, ADB connect retries, reliable power on/off. Verified
+  off→on, on→off, and off→YouTube (TV focus became the YouTube app).
+- YouTube: `h_youtube` now handles "show me … on youtube" and "… music video"
+  without the word YouTube, extracts clean search queries, wakes the TV,
+  resolves a real video and opens it in the TV app. Both requested example
+  phrases verified playing on the TV.
+- Alarm "Timer for how long?" traced to **LibreEcho 0.14.5 firmware** (local
+  timers exist; native alarms only arrived in 0.14.6), not the hub — hub
+  returns `Alarm set for Tuesday 08:00` for the exact phrase. Added ASR
+  correction (timer→alarm when a day/time word is present), stronger Whisper
+  prompt examples, and extra alarm phrasings so "wake me at 8 tomorrow
+  morning" reliably reaches the hub. Full notes:
+  `TV-AND-ALARMS-2026-11-23.md`.
+- `start-hub-detached.ps1` now recycles Whisper too, so prompt changes load
+  after a hub restart.
+- Test alarms were cancelled after verification.
 
 ---
 

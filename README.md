@@ -116,6 +116,14 @@ wake-ups), and a **Response time** card with measured ASR/TTS latency and
 Fast/Balanced/Quality LLM presets. See
 `docs/DASHBOARD-CONTROLS-2026-11-23.md` for details and measurements.
 
+The TV integration now wakes the TV from a voice command (ADB in standby,
+Wake-on-LAN with an auto-learned `TV_MAC`, then CEC), and YouTube requests such
+as "show me Al Jazeera live on YouTube" or "play any Jamaican dancehall music
+video" open a real video in the TV's YouTube app even when the screen was off.
+See `docs/TV-AND-ALARMS-2026-11-23.md`, including why LibreEcho 0.14.5's local
+timer parser can answer "Timer for how long?" to an alarm request and which
+phrasing reliably reaches the hub.
+
 Use **Customize** to change the theme, accent colour, which cards are visible,
 their order, the refresh interval and the quick-command text; preferences are
 saved in the browser. The **Configuration** card can edit non-secret `.env`

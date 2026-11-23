@@ -256,6 +256,7 @@ class Settings:
     tv_cache_seconds: float = 60.0
     tv_adb_host: str = ""             # empty = use the cast device's IP
     tv_adb_port: int = 5555
+    tv_mac: str = ""                  # for Wake-on-LAN when the TV is fully off
     adb_path: str = ""                # empty = find "adb" on PATH
 
     @classmethod
@@ -336,6 +337,7 @@ class Settings:
             tv_cache_seconds=float(env_str("TV_CACHE_SECONDS", "60")),
             tv_adb_host=env_str("TV_ADB_HOST", ""),
             tv_adb_port=env_int("TV_ADB_PORT", 5555),
+            tv_mac=env_str("TV_MAC", ""),
             adb_path=env_str("ADB_PATH", ""),
         )
 
@@ -2079,6 +2081,23 @@ def correct_clone_phrase(text: str) -> str:
     return text
 
 
+def correct_common_asr(text: str) -> str:
+    """Fix recurring Whisper mishearings that change the meaning of a command.
+
+    'alarm' is often transcribed as 'timer'. When the phrase contains a clock
+    time or a day word it is an alarm, not a duration timer — and the speaker's
+    own timer parser would otherwise answer "how long?" and never reach us.
+    """
+    out = str(text or "").strip()
+    if re.search(r"\btimer\b", out, re.IGNORECASE) and re.search(
+            r"\b(?:tomorrow|tonight|morning|evening|am|pm|domani|stasera|mattina|"
+            r"at\s+\d|alle\s+\d|alle\s+\d{1,2})\b", out, re.IGNORECASE):
+        fixed = re.sub(r"\btimer\b", "alarm", out, flags=re.IGNORECASE)
+        log.info("ASR correction: %r -> %r", out, fixed)
+        return fixed
+    return out
+
+
 def _looks_italian(text: str) -> bool:
     words = set(re.findall(r"[a-zàèìòù]+", str(text or "").lower()))
     score = len(words & _ITALIAN_HINTS)
@@ -3316,18 +3335,35 @@ async def h_flights(text: str, match, ctx: Context) -> Reply:
 
 
 async def h_youtube(text: str, match, ctx: Context) -> Reply:
-    query = re.sub(r"^\s*(?:please\s+)?(?:play|watch|put on|riproduci)\s+", "", text,
+    # "Alexa, show me Al Jazeera live on YouTube", "play any Jamaican dancehall
+    # music video" -> keep the useful search words, drop only the command shell.
+    query = re.sub(r"^\s*(?:alexa[,\s]+)?(?:please\s+)?(?:i\s+(?:want|would like)\s+to\s+)?"
+                   r"(?:show\s+me|can\s+you\s+(?:show|play)|play|watch|put\s+on|find|"
+                   r"riproduci|mostrami|guarda)\s+", "", text, flags=re.IGNORECASE)
+    query = re.sub(r"^(?:any|some|the|a|an)\s+", "", query, flags=re.IGNORECASE)
+    query = re.sub(r"\s+(?:on|in|su|onto)\s+(?:youtube|yt)\b.*$", "", query,
                    flags=re.IGNORECASE)
-    query = re.sub(r"\s+(?:on|in|su)\s+(?:youtube|yt)\b.*$", "", query,
-                   flags=re.IGNORECASE).strip(" ,.?")
+    query = re.sub(r"\s+(?:su|youtube|yt)\s*$", "", query, flags=re.IGNORECASE)
+    query = query.strip(" ,.?\"'")
     if not query:
         return Reply("What would you like to watch on YouTube?", intent="youtube.play")
+
+    # A media command must work when the screen is off: wake it first.
+    awake = await ctx.tv.ensure_awake()
+    if not awake.ok:
+        log.warning("youtube: TV unavailable: %s", awake.message)
+        url, _resolved = await resolve_youtube_url(ctx.http, query)
+        background(asyncio.to_thread(webbrowser.open, url))
+        return Reply(f"The TV is off and I couldn't wake it ({awake.message}). "
+                     f"I opened YouTube on the computer instead.", intent="youtube.play")
+
     url, resolved = await resolve_youtube_url(ctx.http, query)
     result = await ctx.tv.adb_view_url(url, package="com.google.android.youtube.tv")
     log.info("youtube TV result: ok=%s message=%r", result.ok, result.message)
     if result.ok:
         label = f'"{query}"' if resolved else f"a YouTube search for {query}"
-        return Reply(f"Playing {label} on the TV.", intent="youtube.play")
+        prefix = "Waking the TV. " if not awake.message.startswith("TV is on") else ""
+        return Reply(f"{prefix}Playing {label} on the TV.", intent="youtube.play")
     background(asyncio.to_thread(webbrowser.open, url))
     return Reply("The TV didn't answer, so I opened YouTube on the computer.",
                  intent="youtube.play")
@@ -3839,6 +3875,8 @@ INTENTS: list[Intent] = [
         compile_all(
             r"\b(?:set|create|make|imposta|metti)\b.*?\balarm\b",
             r"\bwake me up\b",
+            r"\bwake me\b.*\b(?:tomorrow|tonight|morning|at\s+\d|domani|stasera)\b",
+            r"\balarm\b.*\b(?:tomorrow|tonight|morning|at\s+\d|domani|stasera)\b",
             r"\bsvegliami\b",
         ),
         h_alarm_set,
@@ -3907,6 +3945,9 @@ INTENTS: list[Intent] = [
     ),
     Intent("youtube.play", compile_all(
         r"\b(?:play|watch|put on|riproduci)\b.*\b(?:on\s+)?(?:youtube|yt)\b",
+        r"\b(?:show me|find|watch|play|put on|mostrami|cerca)\b.*\b(?:on\s+)?(?:youtube|yt)\b",
+        # A "music video" request means YouTube even when the word is omitted.
+        r"\b(?:play|show me|watch|find|put on|riproduci)\b.*\b(?:music\s+)?videos?\b",
     ), h_youtube),
     Intent(
         "tv.play",
@@ -4521,7 +4562,7 @@ class Router:
     async def route(self, text: str) -> Optional[Reply]:
         if not text.strip():
             return None
-        text = correct_clone_phrase(text)
+        text = correct_common_asr(correct_clone_phrase(text))
         clean = normalise(text)
         if FASTPATH_PREFIX in text:
             return Reply(text.split(FASTPATH_PREFIX, 1)[1].strip(), speak="pipeline", intent="fastpath")
