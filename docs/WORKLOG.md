@@ -13,7 +13,9 @@ restart everything.
 | Hub | `olive_hub.py`, port **8765**, ASR proxy **10300** |
 | Whisper ASR | `whisper_wyoming_server.py`, port **10301**, model `base` |
 | Speaker | `http://192.168.1.228:8080/api/v1` (LibreEcho OS 0.14.5; stable 0.14.6 available, see upgrade note) |
-| Dashboard | `http://127.0.0.1:8767/` — token-protected status/config/logs/intents/voice, customisable; watchdog auto-start |
+| Dashboard | `http://127.0.0.1:8767/` — token-protected status/config/logs/intents/voice, customisable; voice picker, intent editor, wake/mic tuning, latency presets; watchdog auto-start |
+| LLM | Groq `qwen/qwen3.8-27b` (fast preset, non-reasoning, 180 max tokens), fallback `openai/gpt-oss-20b` |
+| Speaker mic | wake sensitivity **80** (was 67), mic gain **78** (was 65) — better far-field wake |
 | Wake word | **Alexa** (firmware only ships this model; "Hey Olive" impossible) |
 | LLM | Groq `openai/gpt-oss-120b`, fallback `openai/gpt-oss-20b` |
 | Music | named stations via Music Assistant (`RADIO_PREFER_MA=1`), native fallback |
@@ -25,6 +27,35 @@ restart everything.
 | Tuya cloud | **blocked**: project data center suspended (code 28841107) |
 | Start | `POST /restart` (daily), `.\\start-hub-detached.ps1`, or the scheduled task |
 | Logs | `olive_hub.err` (live), `olive_hub.err.prev` (previous run) |
+
+---
+
+## 2026-11-23 16:45 — voice picker, intent editor, wake tuning, latency work
+
+- Added 4 dashboard cards: **Voice picker** (40 EN / 4 IT Piper voices,
+  catalog from rhasspy/piper-voices, background download job, edits
+  `start-tts-detached.ps1` and recycles TTS), **Intent editor** (add/delete
+  custom regex intents, enable/disable built-ins, hot reload via new hub
+  `/intents` GET/POST), **Wake word / mic** (live read/write of speaker
+  sensitivity + gain), **Response time** (latency benchmark + fast/balanced/
+  quality presets).
+- Hub changes: `custom_intents.json` loader with hot reload, custom intents
+  matched before built-ins, `/intents` endpoints, configurable
+  `LLM_MAX_TOKENS` setting.
+- Set speaker wake sensitivity 67→80 and mic gain 65→78 to fix "have to shout
+  at Alexa from a distance". Applies via the documented 0.14 `PUT /api/v1/`
+  endpoints and persists on the speaker.
+- Diagnosed lag: ASR ~2.0–2.6 s, TTS first audio ~0.9–1.2 s, but the old
+  `gpt-oss-120b` is a reasoning model. Compared Groq models: `qwen/qwen3.8-27b`
+  0.27–0.73 s with correct Italian; `allam-2-7b` 0.3 s but broken Italian.
+  Applied the **fast** preset (`qwen/qwen3.8-27b`, 180 max tokens) and
+  restarted the hub.
+- Fixed latent TTS router bug: unquoted `voice_personas.json` path with spaces
+  broke every TTS restart. Fixed `.env` editor rejecting `LLM_MAX_TOKENS` as a
+  secret. Voice switching is now a background job (no browser timeout).
+- Verified: custom intent added/spoken/removed, voice downloaded+switched+
+  restored, all endpoints 200, all 12 cards render. Full notes:
+  `DASHBOARD-CONTROLS-2026-11-23.md`.
 
 ---
 

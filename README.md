@@ -106,6 +106,16 @@ silently reappearing; **Change token** locks the session again. Ports 6666/66666
 cannot be used: 66666 exceeds the TCP range and Chrome blocks 6666 as an unsafe
 port.
 
+The dashboard also has a **Voice picker** (browse 40 English / 4 Italian Piper
+voices, download and switch with one click; a `.bak` of the TTS script is
+kept), an **Intent editor** (add regex-pattern intents with spoken replies, or
+disable built-ins — hot-reloaded with no hub restart via `custom_intents.json`
+and the hub's `/intents` API), **Wake word / mic** controls (speaker wake
+sensitivity and microphone gain, where higher sensitivity fixes distant
+wake-ups), and a **Response time** card with measured ASR/TTS latency and
+Fast/Balanced/Quality LLM presets. See
+`docs/DASHBOARD-CONTROLS-2026-11-23.md` for details and measurements.
+
 Use **Customize** to change the theme, accent colour, which cards are visible,
 their order, the refresh interval and the quick-command text; preferences are
 saved in the browser. The **Configuration** card can edit non-secret `.env`

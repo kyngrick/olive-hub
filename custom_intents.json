@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "disabled": [],
+  "intents": [
+    {
+      "name": "custom.example",
+      "enabled": false,
+      "patterns": [
+        "hello olive",
+        "ciao olive"
+      ],
+      "reply": "Hello! I am here.",
+      "speak": "pipeline"
+    }
+  ]
+}

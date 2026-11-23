@@ -88,4 +88,20 @@ if ($tts.Trim()) { $tts.TrimEnd() -split "`r?`n" | ForEach-Object { Step "  $_" 
 # WhatsApp bridge (local only; QR scan is a one-time manual step).
 $wa = & (Join-Path $root 'start-whatsapp-bridge.ps1') 2>&1 | Out-String
 if ($wa.Trim()) { $wa.TrimEnd() -split "`r?`n" | ForEach-Object { Step "  $_" } }
+
+# Local dashboard: recycle it on every hub start so code/config changes take
+# effect. This helper runs with the hub's token, so it can stop the elevated
+# dashboard process that the watchdog may have started.
+$dashPid = $null
+foreach ($row in (& netstat.exe -ano -p TCP 2>$null | Select-String 'LISTENING\s+\d+\s*$')) {
+    $parts = ($row.Line -split '\s+') | Where-Object { $_ }
+    if ($parts.Count -ge 5 -and $parts[1] -match ':8767$') { $dashPid = $parts[-1]; break }
+}
+if ($dashPid) {
+    Step "stopping dashboard pid $dashPid"
+    & taskkill.exe /F /PID $dashPid 2>&1 | ForEach-Object { Step "  $_" }
+    Start-Sleep -Seconds 2
+}
+$dash = & (Join-Path $root 'start-dashboard-detached.ps1') 2>&1 | Out-String
+if ($dash.Trim()) { $dash.TrimEnd() -split "`r?`n" | ForEach-Object { Step "  $_" } }
 Step 'done'

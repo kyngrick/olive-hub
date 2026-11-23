@@ -12,16 +12,23 @@ edited from the Configuration card; edits are backed up before being written.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
+import sys
 import tempfile
+import time
+import urllib.request
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from aiohttp import web
 from dotenv import load_dotenv
+
+import voice_manager
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
@@ -34,6 +41,13 @@ ENV_FILE = ROOT / ".env"
 
 SECRET_RE = re.compile(r"(?i)(KEY|TOKEN|SECRET|PASSWORD)")
 ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def is_secret(key: str) -> bool:
+    # MAX_TOKENS is a response-length setting, not a credential.
+    if re.search(r"(?i)MAX_TOKENS?$", key):
+        return False
+    return bool(SECRET_RE.search(key))
 
 LOG_FILES: dict[str, Path] = {
     "hub": ROOT / "olive_hub.err",
@@ -62,8 +76,9 @@ def _env_lines() -> dict[str, str]:
 def config_summary() -> list[dict[str, str]]:
     rows = []
     for key, value in sorted(_env_lines().items()):
-        shown = "<set>" if SECRET_RE.search(key) and value else ("<empty>" if SECRET_RE.search(key) else value)
-        rows.append({"key": key, "value": shown, "secret": bool(SECRET_RE.search(key))})
+        secret = is_secret(key)
+        shown = "<set>" if secret and value else ("<empty>" if secret else value)
+        rows.append({"key": key, "value": shown, "secret": secret})
     return rows
 
 
@@ -211,7 +226,7 @@ async def api_config_set(request: web.Request) -> web.Response:
     value = str(data.get("value", ""))
     if not ENV_KEY_RE.match(key):
         return web.json_response({"ok": False, "error": "key must look like UPPER_CASE_NAME"}, status=400)
-    if SECRET_RE.search(key):
+    if is_secret(key):
         return web.json_response({"ok": False, "error": "secret keys cannot be edited here"}, status=403)
 
     try:
@@ -245,6 +260,247 @@ async def api_config_set(request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": str(exc)}, status=500)
 
 
+async def hub_call(method: str, path: str, payload: dict | None = None,
+                   timeout: float = 8.0) -> Any:
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        async with session.request(method, HUB_URL + path, json=payload,
+                                   headers={"X-Olive-Token": TOKEN},
+                                   timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+            try:
+                return resp.status, await resp.json(content_type=None)
+            except Exception:
+                return resp.status, {"error": await resp.text()}
+
+
+# ---- voice selection -------------------------------------------------
+async def api_voices(request: web.Request) -> web.Response:
+    lang = request.query.get("lang", "en")
+    return web.json_response({"lang": lang, "voices": voice_manager.list_voices(lang),
+                              "current": voice_manager.current_voices()})
+
+
+VOICE_JOBS: dict[str, dict[str, Any]] = {}
+
+
+async def _voice_job_worker(job_id: str, lang: str, key: str) -> None:
+    job = VOICE_JOBS[job_id]
+    try:
+        job["status"] = "downloading"
+        job["message"] = "Downloading voice model (can take several minutes)…"
+        ok, msg = await asyncio.to_thread(voice_manager.install_voice, key)
+        if not ok:
+            job.update(status="error", message=f"Download failed: {msg}")
+            return
+        job["status"] = "restarting"
+        job["message"] = "Model installed. Restarting the TTS stack…"
+        result = await asyncio.to_thread(voice_manager.set_voice, lang, key, False)
+        job.update(status="done" if result.get("ok") else "error",
+                   message=result.get("message") or result.get("error") or "unknown result")
+    except Exception as exc:
+        job.update(status="error", message=str(exc))
+
+
+async def api_voice_set(request: web.Request) -> web.Response:
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+    lang, key = str(data.get("lang", "en")), str(data.get("key", ""))
+    try:
+        catalog = voice_manager._catalog()
+        if key not in catalog:
+            return web.json_response({"ok": False, "error": f"unknown voice {key}"}, status=400)
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": f"cannot read catalog: {exc}"}, status=500)
+    job_id = uuid.uuid4().hex[:12]
+    VOICE_JOBS[job_id] = {"status": "queued", "message": "Queued…", "lang": lang, "key": key}
+    asyncio.create_task(_voice_job_worker(job_id, lang, key))
+    return web.json_response({"ok": True, "job": job_id, "message": "Voice change started."})
+
+
+async def api_voice_job(request: web.Request) -> web.Response:
+    job_id = request.query.get("id", "")
+    job = VOICE_JOBS.get(job_id)
+    if not job:
+        return web.json_response({"ok": False, "error": "unknown job"}, status=404)
+    return web.json_response({"ok": True, **job})
+
+
+# ---- intents ---------------------------------------------------------
+async def api_intents_get(_request: web.Request) -> web.Response:
+    try:
+        status, body = await hub_call("GET", "/intents")
+        if status == 200:
+            return web.json_response({"ok": True, **body})
+        return web.json_response({"ok": False, "error": body}, status=status)
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=502)
+
+
+async def api_intents_set(request: web.Request) -> web.Response:
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+    try:
+        status, body = await hub_call("POST", "/intents", data, timeout=10)
+        return web.json_response(body, status=status)
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=502)
+
+
+# ---- speaker wake word / microphone ----------------------------------
+async def api_speaker_get(_request: web.Request) -> web.Response:
+    try:
+        import olive_hub as oh
+        settings = oh.Settings.from_env()
+        device = oh.LibreEcho(settings)
+        await device.start()
+        try:
+            wake = await device.call("GET", "/wake-word")
+            audio = await device.call("GET", "/audio")
+        finally:
+            await device.close()
+        return web.json_response({"ok": True,
+                                  "sensitivity": (wake.get("data") or {}).get("sensitivity"),
+                                  "wake_word": (wake.get("data") or {}).get("wake_word"),
+                                  "gain": (audio.get("data") or {}).get("microphone_gain"),
+                                  "muted": (audio.get("data") or {}).get("microphone_muted")})
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=502)
+
+
+async def api_speaker_set(request: web.Request) -> web.Response:
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+    try:
+        import olive_hub as oh
+        settings = oh.Settings.from_env()
+        device = oh.LibreEcho(settings)
+        await device.start()
+        applied = {}
+        try:
+            if "sensitivity" in data:
+                val = max(0, min(100, int(data["sensitivity"])))
+                await device.call("PUT", "/wake-word", {"sensitivity": val}, confirm=True)
+                applied["sensitivity"] = val
+            if "gain" in data:
+                val = max(0, min(100, int(data["gain"])))
+                await device.call("PUT", "/audio", {"microphone_gain": val}, confirm=True)
+                applied["gain"] = val
+        finally:
+            await device.close()
+        return web.json_response({"ok": True, "applied": applied})
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=502)
+
+
+# ---- latency benchmark -----------------------------------------------
+async def api_latency(_request: web.Request) -> web.Response:
+    """Measure ASR and TTS first-audio latency with real Wyoming connections."""
+    sys_path = os.path.join(str(ROOT), ".venv", "Lib", "site-packages")
+    if sys_path not in sys.path:
+        sys.path.insert(0, sys_path)
+    out: dict[str, Any] = {"ok": True}
+    try:
+        from wyoming.client import AsyncTcpClient
+        from wyoming.audio import AudioChunk, AudioStart, AudioStop
+        from wyoming.tts import Synthesize, SynthesizeVoice
+        from wyoming.asr import Transcribe, Transcript
+        import wave
+
+        # TTS first-audio
+        t0 = time.monotonic()
+        first = None
+        client = AsyncTcpClient("127.0.0.1", int(_env_lines().get("TTS_ROUTER_PORT", "10200")),
+                                connect_timeout=5)
+        await client.connect()
+        await client.write_event(Synthesize(text="Hello, this is a timing test.",
+                                            voice=SynthesizeVoice(name="")).event())
+        try:
+            for _ in range(2000):
+                ev = await asyncio.wait_for(client.read_event(), timeout=20)
+                if ev is None:
+                    break
+                if AudioChunk.is_type(ev.type) and first is None:
+                    first = time.monotonic() - t0
+                if ev.type in ("stop", "audio-stop"):
+                    break
+        finally:
+            await client.disconnect()
+        out["tts_first_audio_s"] = round(first or time.monotonic() - t0, 2)
+
+        # ASR on an existing local recording
+        wav = ROOT / "voice_refs" / "ricky.wav"
+        if wav.exists():
+            with wave.open(str(wav), "rb") as w:
+                rate, width, channels = w.getframerate(), w.getsampwidth(), w.getnchannels()
+                pcm = w.readframes(w.getnframes())
+            t0 = time.monotonic()
+            client = AsyncTcpClient("127.0.0.1", int(_env_lines().get("WHISPER_PORT", "10301")),
+                                    connect_timeout=5)
+            await client.connect()
+            await client.write_event(Transcribe().event())
+            await client.write_event(AudioStart(rate=rate, width=width, channels=channels).event())
+            step = max(1, rate * channels * width // 5)
+            for i in range(0, len(pcm), step):
+                await client.write_event(AudioChunk(rate=rate, width=width, channels=channels,
+                                                    audio=pcm[i:i + step]).event())
+            await client.write_event(AudioStop().event())
+            try:
+                for _ in range(2000):
+                    ev = await asyncio.wait_for(client.read_event(), timeout=30)
+                    if ev is None or Transcript.is_type(ev.type):
+                        break
+            finally:
+                await client.disconnect()
+            out["asr_total_s"] = round(time.monotonic() - t0, 2)
+    except Exception as exc:
+        out["ok"] = False
+        out["error"] = str(exc)
+    return web.json_response(out)
+
+
+# ---- performance presets ---------------------------------------------
+async def api_performance(_request: web.Request) -> web.Response:
+    """Apply a latency/quality preset to LLM settings in .env."""
+    presets = {
+        "fast": {"LLM_MODEL": "qwen/qwen3.8-27b",
+                 "LLM_MODEL_FALLBACK": "openai/gpt-oss-20b",
+                 "LLM_MAX_TOKENS": "180"},
+        "balanced": {"LLM_MODEL": "openai/gpt-oss-20b",
+                     "LLM_MODEL_FALLBACK": "qwen/qwen3.8-27b",
+                     "LLM_MAX_TOKENS": "500"},
+        "quality": {"LLM_MODEL": "openai/gpt-oss-120b",
+                    "LLM_MODEL_FALLBACK": "openai/gpt-oss-20b",
+                    "LLM_MAX_TOKENS": "900"},
+    }
+    # Preset name supplied as ?preset=...
+    # (kept as a query param so this endpoint stays POST-only for CSRF clarity)
+    name = _request.query.get("preset", "")
+    values = presets.get(name)
+    if not values:
+        return web.json_response({"ok": False, "error": "unknown preset",
+                                  "available": list(presets)}, status=400)
+    results = {}
+    for key, value in values.items():
+        # reuse the safe writer logic directly
+        class _Req:
+            async def json(self):
+                return {"key": key, "value": value}
+        resp = await api_config_set(_Req())  # type: ignore[arg-type]
+        data = json.loads(resp.text)
+        results[key] = data.get("ok", False)
+    if not all(results.values()):
+        return web.json_response({"ok": False, "error": "failed to write all keys",
+                                  "detail": results}, status=500)
+    return web.json_response({"ok": True, "preset": name, "written": results,
+                              "note": "Restart the hub to apply LLM changes."})
+
+
 async def api_restart(_request: web.Request) -> web.Response:
     import aiohttp
     try:
@@ -263,6 +519,15 @@ def make_app() -> web.Application:
     app.router.add_post("/api/local-login", api_local_login)
     app.router.add_get("/api/logs", api_logs)
     app.router.add_post("/api/config", api_config_set)
+    app.router.add_get("/api/voices", api_voices)
+    app.router.add_post("/api/voice", api_voice_set)
+    app.router.add_get("/api/voice/job", api_voice_job)
+    app.router.add_get("/api/intents", api_intents_get)
+    app.router.add_post("/api/intents", api_intents_set)
+    app.router.add_get("/api/speaker", api_speaker_get)
+    app.router.add_post("/api/speaker", api_speaker_set)
+    app.router.add_post("/api/latency", api_latency)
+    app.router.add_post("/api/performance", api_performance)
     app.router.add_post("/api/restart", api_restart)
     return app
 
@@ -329,6 +594,29 @@ button{cursor:pointer}button:hover{border-color:var(--accent)}button.mini{paddin
 <div class="card" id="card-intents"><h2>Intents (<span id="intentcount">0</span>)</h2>
 <input id="ifilter" placeholder="Filter intents…" oninput="renderIntents()" style="width:100%;margin-bottom:8px">
 <div id="intents" class="chips"></div></div>
+<div class="card" id="card-voicesel"><h2>Voice picker (Piper)</h2>
+<div class="bar" style="margin-bottom:8px"><select id="voicelang" onchange="loadVoices()"><option value="en">English</option><option value="it">Italian</option></select>
+<span id="voicecurrent" class="dim"></span></div>
+<div id="voicelist" style="max-height:260px;overflow:auto"></div></div>
+<div class="card" id="card-intentedit"><h2>Intent editor (hot reload)</h2>
+<div id="intentlist" style="max-height:200px;overflow:auto;margin-bottom:8px"></div>
+<input id="newiname" placeholder="name, e.g. custom.coffee" style="width:100%;margin-bottom:4px">
+<input id="newipatterns" placeholder="patterns, comma separated (regex)" style="width:100%;margin-bottom:4px">
+<input id="newireply" placeholder="spoken reply" style="width:100%;margin-bottom:4px">
+<div class="bar"><button class="mini" onclick="addCustomIntent()">Add intent</button><button class="mini" onclick="loadIntents()">Reload</button></div>
+<div id="intenterrmsg" class="err"></div></div>
+<div class="card" id="card-speaker"><h2>Wake word / microphone</h2>
+<div id="speakerinfo" class="dim">loading…</div>
+<div class="rowline"><label>Wake sensitivity <input id="sensval" type="number" min="0" max="100" value="67" style="width:90px"></label></div>
+<div class="rowline"><label>Mic gain <input id="gainval" type="number" min="0" max="100" value="65" style="width:90px"></label></div>
+<div class="bar"><button class="mini" onclick="applySpeaker()">Apply to speaker</button><button class="mini" onclick="loadSpeaker()">Refresh</button></div>
+<div id="speakererr" class="err"></div>
+<p class="note">Higher sensitivity = easier to wake from a distance. 0 = strictest (threshold 0.85), 100 = most sensitive (0.41). Mic gain above ~78 may introduce hiss.</p></div>
+<div class="card" id="card-perf"><h2>Response time</h2>
+<div id="perfinfo" class="dim">Measured: ASR ~2.6 s (6.7 s audio), TTS first audio ~1.2 s, LLM ~0.3–0.8 s depending on model.</div>
+<div class="bar" style="margin:8px 0"><button class="mini" onclick="applyPreset('fast')">Fast</button><button class="mini" onclick="applyPreset('balanced')">Balanced</button><button class="mini" onclick="applyPreset('quality')">Quality</button><button class="mini" onclick="runLatency()">Measure now</button></div>
+<div id="perfmsg" class="err"></div>
+<p class="note">Fast uses <b>qwen/qwen3.8-27b</b> (non-reasoning, multilingual, 0.3–0.8 s; good English and Italian). Quality uses gpt-oss-120b with thinking. Restart the hub after switching.</p></div>
 <div class="card" id="card-config" style="grid-column:1/-1"><h2>Configuration (.env, secrets redacted)</h2>
 <div class="cfgsave"><input id="cfgkey" placeholder="KEY"><input id="cfgval" placeholder="new value"><button class="mini" onclick="saveConfig()">Save value</button></div>
 <div id="cfgerr" class="err"></div>
@@ -342,17 +630,20 @@ button{cursor:pointer}button:hover{border-color:var(--accent)}button.mini{paddin
 
 <script>
 const DEFAULT_COMMANDS = ".\\.venv\\Scripts\\python.exe tools\\kokoro\\test_kokoro.py\n.\\.venv\\Scripts\\python.exe tools\\kokoro\\record_and_clone.py --name Ricky\n\nAlexa clone → sample → \"Who is this?\" → \"Ricky\"\nAlexa speak like KokoroIT / KokoroEN";
-const CARD_NAMES = {services:'Hub / services',features:'LLM / features',voice:'Voice',intents:'Intents',config:'Configuration',logs:'Logs',quick:'Quick commands',libreecho:'LibreEcho upgrade'};
+const CARD_NAMES = {services:'Hub / services',features:'LLM / features',voice:'Voice',voicesel:'Voice picker',intents:'Intents',intentedit:'Intent editor',speaker:'Wake / mic',perf:'Performance',config:'Configuration',logs:'Logs',quick:'Quick commands',libreecho:'LibreEcho upgrade'};
+const DEFAULT_ORDER = ['services','features','voice','voicesel','intents','intentedit','speaker','perf','config','logs','quick','libreecho'];
 const DEFAULTS = {theme:'midnight',accent:'#58a6ff',interval:5,commands:DEFAULT_COMMANDS,
-  show:{services:true,features:true,voice:true,intents:true,config:true,logs:true,quick:true,libreecho:true},
-  order:['services','features','voice','intents','config','logs','quick','libreecho']};
+  show:Object.fromEntries(DEFAULT_ORDER.map(k=>[k,true])), order:DEFAULT_ORDER.slice()};
 const THEMES = {midnight:{bg:'#0d1117',card:'#161b22',fg:'#c9d1d9'},ocean:{bg:'#071a2b',card:'#0f2942',fg:'#d6e9ff'},light:{bg:'#f6f8fa',card:'#ffffff',fg:'#1f2328'},forest:{bg:'#0b1712',card:'#13251c',fg:'#d8f3e2'}};
 let T=sessionStorage.getItem('olive_token')||'', DATA=null, LOGS=[], TIMER=null;
 let PREFS=loadPrefs();
 
 function loadPrefs(){
   try{let p=JSON.parse(localStorage.getItem('olive_prefs')||'null');
-    if(p&&p.order&&p.show){return Object.assign({},DEFAULTS,p,{show:Object.assign({},DEFAULTS.show,p.show)});}
+    if(p&&p.order&&p.show){
+      const order=DEFAULT_ORDER.filter(k=>p.order.includes(k)).concat(DEFAULT_ORDER.filter(k=>!p.order.includes(k)));
+      return Object.assign({},DEFAULTS,p,{order,show:Object.assign({},DEFAULTS.show,p.show)});
+    }
   }catch(e){}
   return JSON.parse(JSON.stringify(DEFAULTS));
 }
@@ -414,7 +705,7 @@ async function login(e){
   const tok=document.getElementById('token').value.trim();
   if(!tok){showLogin('Enter the token first.');return;}
   T=tok;showLogin('Checking token…');
-  try{DATA=await api('/api/summary');sessionStorage.setItem('olive_token',T);hideLogin();render();await loadLogs();}
+  try{DATA=await api('/api/summary');sessionStorage.setItem('olive_token',T);hideLogin();render();await loadLogs();loadVoices();loadIntents();loadSpeaker();}
   catch(err){T='';sessionStorage.removeItem('olive_token');showLogin('Token rejected. Check HUB_TOKEN in .env ('+err.message+').');}
 }
 async function localLogin(){
@@ -458,6 +749,114 @@ async function saveConfig(){
     if(r.ok){document.getElementById('cfgval').value='';loadAll();}
   }catch(e){err.textContent='Failed: '+e.message;}
 }
+// ---- voice picker ----
+async function loadVoices(){
+  const lang=document.getElementById('voicelang').value;
+  try{
+    const d=await api('/api/voices?lang='+lang);
+    document.getElementById('voicecurrent').textContent='current: '+(d.current?.[lang]||'-');
+    document.getElementById('voicelist').innerHTML=(d.voices||[]).map(v=>{
+      if(v.error)return '<div class="bad">'+esc(v.error)+'</div>';
+      const isCur=v.key===d.current?.[lang];
+      return '<div class="rowline"><span style="flex:1">'+esc(v.name)+' <span class="dim">'+esc(v.quality)+' · '+v.size_mb+' MB · '+v.speed+'</span>'+
+        (isCur?' <span class="ok">● active</span>':'')+'</span>'+
+        (v.installed?'<button class="mini" onclick="useVoice(\''+lang+'\',\''+v.key+'\')">Use</button>'
+                    :'<button class="mini" onclick="useVoice(\''+lang+'\',\''+v.key+'\')">Download & use</button>')+'</div>';
+    }).join('');
+  }catch(e){document.getElementById('voicelist').innerHTML='<div class="bad">'+esc(e.message)+'</div>';}
+}
+async function useVoice(lang,key){
+  if(!confirm('Switch '+lang.toUpperCase()+' voice to '+key+'? This restarts the TTS stack.'))return;
+  const box=document.getElementById('voicelist');box.innerHTML='Starting…';
+  try{
+    const r=await api('/api/voice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lang,key,install:true})});
+    if(!r.ok){box.innerHTML='<span class="bad">'+esc(r.error)+'</span>';return;}
+    pollVoiceJob(r.job,box);
+  }catch(e){box.innerHTML='<span class="bad">'+esc(e.message)+'</span>';}
+}
+async function pollVoiceJob(id,box){
+  try{
+    const d=await api('/api/voice/job?id='+encodeURIComponent(id));
+    box.innerHTML='<span class="'+(d.status==='done'?'ok':(d.status==='error'?'bad':'dim'))+'">'+esc(d.status)+': '+esc(d.message)+'</span>';
+    if(d.status==='done'){loadVoices();loadAll();}
+    else if(d.status!=='error')setTimeout(()=>pollVoiceJob(id,box),2000);
+  }catch(e){box.innerHTML='<span class="bad">'+esc(e.message)+'</span>';}
+}
+// ---- intent editor ----
+let INTENT_DATA=null;
+async function loadIntents(){
+  try{
+    INTENT_DATA=await api('/api/intents');
+    const all=[...(INTENT_DATA.customs||[]),...(INTENT_DATA.builtins||[])];
+    document.getElementById('intentlist').innerHTML=all.map(i=>
+      '<div class="rowline"><label><input type="checkbox" data-intent="'+esc(i.name)+'" '+(i.enabled?'checked':'')+
+      (i.custom?' style="accent-color:var(--accent)"':'')+'> '+esc(i.name)+(i.custom?' <span class="ok">custom</span>':'')+'</label>'+
+      (i.custom?'<button class="mini" onclick="deleteCustomIntent(\''+esc(i.name)+'\')">Delete</button>':'')+'</div>').join('');
+    document.getElementById('intenterrmsg').textContent='';
+  }catch(e){document.getElementById('intenterrmsg').textContent=e.message;}
+}
+async function saveIntents(){
+  const disabled=[...document.querySelectorAll('[data-intent]')].filter(c=>!c.checked).map(c=>c.dataset.intent);
+  const customs=(INTENT_DATA?.customs||[]).map(c=>({
+    name:c.name,enabled:true,patterns:c.patterns||[],reply:c.reply||'',speak:c.speak||'pipeline'}));
+  const payload={version:1,disabled,intents:customs};
+  try{
+    const r=await api('/api/intents',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    document.getElementById('intenterrmsg').textContent=r.ok?'Saved and hot-reloaded.':('Failed: '+JSON.stringify(r.errors||r.error));
+    if(r.ok)loadIntents();
+  }catch(e){document.getElementById('intenterrmsg').textContent='Failed: '+e.message;}
+}
+async function addCustomIntent(){
+  const name=document.getElementById('newiname').value.trim();
+  const patterns=document.getElementById('newipatterns').value.split(',').map(s=>s.trim()).filter(Boolean);
+  const reply=document.getElementById('newireply').value.trim();
+  if(!name||!patterns.length||!reply){document.getElementById('intenterrmsg').textContent='Fill name, patterns and reply.';return;}
+  if(!INTENT_DATA)await loadIntents();
+  INTENT_DATA.customs.push({name,enabled:true,patterns,reply,speak:'pipeline'});
+  document.getElementById('newiname').value=document.getElementById('newipatterns').value=document.getElementById('newireply').value='';
+  await saveIntents();
+}
+async function deleteCustomIntent(name){
+  if(!confirm('Delete custom intent '+name+'?'))return;
+  if(!INTENT_DATA)await loadIntents();
+  INTENT_DATA.customs=INTENT_DATA.customs.filter(c=>c.name!==name);
+  await saveIntents();
+}
+// wire checkbox changes to a save
+document.addEventListener('change',e=>{if(e.target?.dataset?.intent)saveIntents();});
+// ---- speaker ----
+async function loadSpeaker(){
+  try{
+    const d=await api('/api/speaker');
+    if(!d.ok)throw Error(d.error);
+    document.getElementById('speakerinfo').textContent='wake='+d.wake_word+' · sensitivity '+d.sensitivity+' · gain '+d.gain+(d.muted?' · MUTED':'');
+    document.getElementById('sensval').value=d.sensitivity;document.getElementById('gainval').value=d.gain;
+    document.getElementById('speakererr').textContent='';
+  }catch(e){document.getElementById('speakererr').textContent=e.message;}
+}
+async function applySpeaker(){
+  try{
+    const r=await api('/api/speaker',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({sensitivity:Number(document.getElementById('sensval').value),gain:Number(document.getElementById('gainval').value)})});
+    document.getElementById('speakererr').textContent=r.ok?'Applied to speaker.':('Failed: '+r.error);
+    if(r.ok)loadSpeaker();
+  }catch(e){document.getElementById('speakererr').textContent='Failed: '+e.message;}
+}
+// ---- performance ----
+async function applyPreset(name){
+  if(!confirm('Apply "'+name+'" LLM preset? Restart the hub afterwards.'))return;
+  try{
+    const r=await api('/api/performance?preset='+name,{method:'POST'});
+    document.getElementById('perfmsg').textContent=r.ok?'Saved. Restart the hub to apply.':('Failed: '+JSON.stringify(r.error||r.detail));
+  }catch(e){document.getElementById('perfmsg').textContent='Failed: '+e.message;}
+}
+async function runLatency(){
+  document.getElementById('perfmsg').textContent='Measuring…';
+  try{
+    const r=await api('/api/latency',{method:'POST'});
+    document.getElementById('perfmsg').textContent=r.ok?('ASR '+r.asr_total_s+'s · TTS first audio '+r.tts_first_audio_s+'s'):('Failed: '+r.error);
+  }catch(e){document.getElementById('perfmsg').textContent='Failed: '+e.message;}
+}
 function renderLogs(){document.getElementById('logtitle').textContent=document.getElementById('logname').value;document.getElementById('logs').textContent=(LOGS||[]).join('');}
 function renderLibreEcho(){
   document.getElementById('leinfo').innerHTML='<b>Stable: 0.14.6</b> (17 Nov 2026) · installed: 0.14.5<br>'+
@@ -486,7 +885,7 @@ document.getElementById('logname').onchange=loadLogs;
 applyPrefs();
 if(T){
   showLogin('Checking saved token…');
-  api('/api/summary').then(d=>{DATA=d;hideLogin();render();loadLogs();})
+  api('/api/summary').then(d=>{DATA=d;hideLogin();render();loadLogs();loadVoices();loadIntents();loadSpeaker();})
     .catch(()=>{T='';sessionStorage.removeItem('olive_token');showLogin('Saved token was rejected. Check HUB_TOKEN in .env.');});
 }else showLogin();
 </script></body></html>"""

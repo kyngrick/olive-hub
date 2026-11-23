@@ -33,6 +33,7 @@ import random
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import webbrowser
 import wave
@@ -181,6 +182,7 @@ class Settings:
     llm_token: str = ""
     llm_model: str = "openai/gpt-oss-120b"
     llm_model_fallback: str = "openai/gpt-oss-20b"
+    llm_max_tokens: int = 900
     llm_timeout: float = 30.0
 
     # Home Assistant (optional)
@@ -290,6 +292,7 @@ class Settings:
             llm_token=llm_token,
             llm_model=env_str("LLM_MODEL", cls.llm_model),
             llm_model_fallback=env_str("LLM_MODEL_FALLBACK", cls.llm_model_fallback),
+            llm_max_tokens=env_int("LLM_MAX_TOKENS", cls.llm_max_tokens),
             ha_url=(env_str("HA_URL") or env_str("HOME_ASSISTANT_URL")).rstrip("/"),
             ha_token=env_str("HA_TOKEN") or env_str("HOME_ASSISTANT_TOKEN"),
             tuya_region=env_str("TUYA_REGION", cls.tuya_region),
@@ -4192,6 +4195,112 @@ INTENTS: list[Intent] = [
 ]
 
 
+# =====================================================================
+# USER-EDITABLE INTENTS (hot-reloaded, no hub restart needed)
+# =====================================================================
+# Stored in custom_intents.json next to this file:
+#   {
+#     "version": 1,
+#     "disabled": ["joke", "quote"],          # built-in intent names to mute
+#     "intents": [
+#       {"name": "custom.coffee", "enabled": true,
+#        "patterns": ["make coffee", "prepare the coffee"],
+#        "reply": "Starting the coffee machine.", "speak": "pipeline"}
+#     ]
+#   }
+# Patterns are regular expressions (case-insensitive, applied with search).
+CUSTOM_INTENTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "custom_intents.json")
+CUSTOM_INTENTS: list[Intent] = []
+DISABLED_INTENTS: set[str] = set()
+
+
+def _make_custom_handler(spec: dict) -> Handler:
+    async def handler(_text: str, _hit, _ctx: Context) -> Reply:
+        reply = str(spec.get("reply") or "Okay.")
+        for token, value in (("{text}", _text),):
+            reply = reply.replace(token, value)
+        return Reply(reply, speak=str(spec.get("speak") or "pipeline"),
+                     intent=str(spec.get("name") or "custom"))
+    return handler
+
+
+def apply_intents_config(data: dict | None) -> tuple[list[str], list[str]]:
+    """Apply an intents config dict in-memory. Returns (errors, active names)."""
+    global CUSTOM_INTENTS, DISABLED_INTENTS
+    errors: list[str] = []
+    entries: list[Intent] = []
+    if data is None:
+        data = {"intents": [], "disabled": []}
+    if not isinstance(data, dict):
+        return (["intents config must be an object"], [])
+
+    disabled_raw = data.get("disabled") or []
+    DISABLED_INTENTS = {str(x) for x in disabled_raw if isinstance(x, str)}
+
+    for item in data.get("intents") or []:
+        if not isinstance(item, dict):
+            errors.append("skipped a non-object intent entry")
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name or not re.fullmatch(r"[a-z0-9_.-]+", name, re.IGNORECASE):
+            errors.append(f"invalid intent name: {name!r}")
+            continue
+        if not item.get("enabled", True):
+            continue
+        patterns = [str(p) for p in (item.get("patterns") or []) if isinstance(p, str) and p.strip()]
+        if not patterns:
+            errors.append(f"intent {name}: no patterns")
+            continue
+        try:
+            compiled = compile_all(*patterns)
+        except re.error as exc:
+            errors.append(f"intent {name}: bad regex: {exc}")
+            continue
+        entries.append(Intent(name, compiled, _make_custom_handler(item)))
+    CUSTOM_INTENTS = entries
+    return errors, [i.name for i in entries]
+
+
+def reload_custom_intents() -> tuple[list[str], list[str]]:
+    """Re-read custom_intents.json from disk and apply it in-memory."""
+    try:
+        with open(CUSTOM_INTENTS_FILE, encoding="utf-8-sig") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        data = {"intents": [], "disabled": []}
+    except Exception as exc:
+        return ([f"cannot read custom_intents.json: {exc}"], [])
+    return apply_intents_config(data)
+
+
+def intents_config() -> dict:
+    """Expose built-in + custom intents and their enabled state for the UI."""
+    builtins = [{"name": i.name, "enabled": i.name not in DISABLED_INTENTS,
+                 "custom": False, "examples": i.examples[:3]} for i in INTENTS]
+    customs = []
+    try:
+        with open(CUSTOM_INTENTS_FILE, encoding="utf-8-sig") as handle:
+            raw = json.load(handle)
+    except Exception:
+        raw = {}
+    raw_by_name = {str(x.get("name")): x for x in (raw.get("intents") or [])
+                   if isinstance(x, dict)}
+    for i in CUSTOM_INTENTS:
+        spec = raw_by_name.get(i.name, {})
+        customs.append({"name": i.name, "enabled": True, "custom": True,
+                        "patterns": [p.pattern for p in i.patterns],
+                        "reply": str(spec.get("reply") or ""),
+                        "speak": str(spec.get("speak") or "pipeline"),
+                        "examples": []})
+    return {"builtins": builtins, "customs": customs,
+            "disabled": sorted(DISABLED_INTENTS)}
+
+
+# Apply once at import; the HTTP endpoint can hot-reload later.
+reload_custom_intents()
+
+
 def friendly_error(exc: Exception) -> str:
     message = str(exc)
     if "LibreEcho login failed" in message:
@@ -4443,7 +4552,9 @@ class Router:
                 return reply
             # Not an answer to the question: keep waiting until the TTL.
 
-        for intent in INTENTS:
+        for intent in (*CUSTOM_INTENTS, *INTENTS):
+            if intent.name in DISABLED_INTENTS:
+                continue
             hit = intent.match(clean)
             if hit:
                 log.info("intent=%s text=%r", intent.name, clean[:80])
@@ -4559,7 +4670,8 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
                 "tv_cast_name": settings.tv_cast_name,
                 "tv_adb_host": settings.tv_adb_host,
                 "adb_available": bool(ctx.tv.adb_path()),
-                "intents": [i.name for i in INTENTS],
+                "intents": [i.name for i in (*CUSTOM_INTENTS, *INTENTS)
+                            if i.name not in DISABLED_INTENTS],
             }
         )
 
@@ -4712,7 +4824,7 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
             models.append(settings.llm_model_fallback)
         for name in models:
             payload = {"model": name, "messages": messages, "stream": False,
-                       "max_tokens": 900}
+                       "max_tokens": settings.llm_max_tokens}
             try:
                 async with ctx.http.post(
                     settings.llm_url, json=payload, headers=headers,
@@ -5042,7 +5154,44 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
         asyncio.get_running_loop().call_later(1.0, os._exit, 0)
         return web.json_response({"ok": True, "restarting": True, "pid": os.getpid()})
 
+    async def intents_get(_request: web.Request) -> web.Response:
+        return web.json_response({"ok": True, **intents_config()})
+
+    async def intents_post(request: web.Request) -> web.Response:
+        """Replace custom_intents.json and hot-reload it (no hub restart)."""
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        if not isinstance(data, dict) or "intents" not in data:
+            return web.json_response({"ok": False, "error": "expected {intents: [...]}"}, status=400)
+        data.setdefault("version", 1)
+        # Validate/apply against the posted config first, keeping the old state
+        # so it can be restored if the file write fails.
+        global CUSTOM_INTENTS, DISABLED_INTENTS
+        old_custom, old_disabled = CUSTOM_INTENTS, DISABLED_INTENTS
+        errors, names = apply_intents_config(data)
+        if errors:
+            CUSTOM_INTENTS, DISABLED_INTENTS = old_custom, old_disabled
+            return web.json_response({"ok": False, "errors": errors}, status=400)
+        try:
+            directory = os.path.dirname(CUSTOM_INTENTS_FILE) or "."
+            fd, tmp = tempfile.mkstemp(prefix=".custom-intents-", suffix=".json", dir=directory)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False)
+            os.replace(tmp, CUSTOM_INTENTS_FILE)
+        except Exception as exc:
+            CUSTOM_INTENTS, DISABLED_INTENTS = old_custom, old_disabled
+            log.exception("failed to save custom intents")
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        log.info("custom intents reloaded: %d active, %d built-ins disabled",
+                 len(names), len(DISABLED_INTENTS))
+        return web.json_response({"ok": True, "active": names,
+                                  "disabled": sorted(DISABLED_INTENTS)})
+
     app.router.add_get("/health", health)
+    app.router.add_get("/intents", intents_get)
+    app.router.add_post("/intents", intents_post)
     app.router.add_get("/v1/models", models)
     app.router.add_post("/command", command)
     app.router.add_post("/v1/chat/completions", chat)
