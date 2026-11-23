@@ -59,6 +59,7 @@ about port **8765** (8766 has no inbound allow rule on some Windows installs).
 | Port | Service |
 |---|---|
 | 8765 | Hub HTTP (`/health`, `/command`, `/v1/chat/completions`, `/memory`, `/restart`, `/scan`) |
+| 8767 | Local dashboard (config/status/logs/intents/voice) |
 | 10300 | Wyoming ASR proxy → Whisper |
 | 10301 | Local Whisper Wyoming server |
 | 10200 | TTS language router (speaker's TTS target) |
@@ -85,6 +86,23 @@ clone / speak like Ricky / use my normal voice / list voices
 ```
 
 `/health` lists all registered intents (68+).
+
+## Local dashboard
+
+A token-protected control/test UI runs on `127.0.0.1:8767` (override with
+`DASH_PORT` in `.env`). It shows hub/service health, LLM/features, voice and
+piper config, all intents (filterable), the redacted `.env` config and live log
+tabs, with a refresh button and a restart-hub button.
+
+```powershell
+.\start-dashboard-detached.ps1     # start it (auto-started by the watchdog too)
+# open http://127.0.0.1:8767/ and click "Use local token"
+```
+
+The token stays in browser `sessionStorage` and is sent as `X-Olive-Token`;
+the "Use local token" convenience endpoint only works when the dashboard is
+bound to localhost. Ports 6666/66666 cannot be used: 66666 exceeds the TCP
+range and Chrome blocks 6666 as an unsafe port.
 
 ## Configuration
 
