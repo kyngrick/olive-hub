@@ -12,7 +12,8 @@ restart everything.
 |---|---|
 | Hub | `olive_hub.py`, port **8765**, ASR proxy **10300** |
 | Whisper ASR | `whisper_wyoming_server.py`, port **10301**, model `base` |
-| Speaker | `http://192.168.1.228:8080/api/v1` (LibreEcho OS 0.14.5) |
+| Speaker | `http://192.168.1.228:8080/api/v1` (LibreEcho OS 0.14.5; stable 0.14.6 available, see upgrade note) |
+| Dashboard | `http://127.0.0.1:8767/` — token-protected status/config/logs/intents/voice, customisable; watchdog auto-start |
 | Wake word | **Alexa** (firmware only ships this model; "Hey Olive" impossible) |
 | LLM | Groq `openai/gpt-oss-120b`, fallback `openai/gpt-oss-20b` |
 | Music | named stations via Music Assistant (`RADIO_PREFER_MA=1`), native fallback |
@@ -24,6 +25,34 @@ restart everything.
 | Tuya cloud | **blocked**: project data center suspended (code 28841107) |
 | Start | `POST /restart` (daily), `.\\start-hub-detached.ps1`, or the scheduled task |
 | Logs | `olive_hub.err` (live), `olive_hub.err.prev` (previous run) |
+
+---
+
+## 2026-11-23 12:25 — dashboard login fix, customisation, config editor, LibreEcho research
+
+- Fixed the login overlay: a rejected/stale token now shows a clear inline error
+  ("Token rejected. Check HUB_TOKEN in .env") instead of silently reappearing.
+  Valid tokens hide the overlay reliably; added a **Change token** button to
+  lock the session and re-enter credentials. Background refresh no longer
+  force-reopens the login box.
+- Added a **Customize** panel: theme presets (Midnight/Ocean/Light/Forest),
+  accent colour, show/hide cards, drag-free up/down card ordering, refresh
+  interval (2–120 s) and editable quick commands. Preferences persist in
+  browser `localStorage`; verified persistence across reload.
+- Added a non-secret `.env` editor in the Configuration card (`POST /api/config`),
+  with strict key validation, rejection of KEY/TOKEN/SECRET/PASSWORD keys (403)
+  and a timestamped `.env.bak-*` backup before each write. Verified write +
+  backup and 403 for `HUB_TOKEN`; removed the test backup afterwards.
+- HTML is served with explicit `charset=utf-8`; repaired double-encoded
+  characters caused by an earlier PowerShell edit.
+- Researched LibreEcho: latest stable is **0.14.6** (17 Nov 2026); installed
+  0.14.5. Verdict: safe in-place signed OTA via **System → System update →
+  Check for updates** (do NOT hand-upload the file — broken in 0.14.6).
+  Fixes Sendspin resume-after-voice and Wi-Fi pauses that affect our setup.
+  Full assessment + pre/post-upgrade smoke tests in
+  `LIBREECHO-UPGRADE-2026-11-23.md`. Upgrade not performed — user decision.
+- Verified dashboard: 200 HTML, `text/html; charset=utf-8`, 9/9 services,
+  72 intents, login/customisation flows tested in the browser.
 
 ---
 

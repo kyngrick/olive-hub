@@ -101,8 +101,25 @@ tabs, with a refresh button and a restart-hub button.
 
 The token stays in browser `sessionStorage` and is sent as `X-Olive-Token`;
 the "Use local token" convenience endpoint only works when the dashboard is
-bound to localhost. Ports 6666/66666 cannot be used: 66666 exceeds the TCP
-range and Chrome blocks 6666 as an unsafe port.
+bound to localhost. A rejected token shows a clear inline error instead of
+silently reappearing; **Change token** locks the session again. Ports 6666/66666
+cannot be used: 66666 exceeds the TCP range and Chrome blocks 6666 as an unsafe
+port.
+
+Use **Customize** to change the theme, accent colour, which cards are visible,
+their order, the refresh interval and the quick-command text; preferences are
+saved in the browser. The **Configuration** card can edit non-secret `.env`
+values (secret keys are refused with HTTP 403) and makes a timestamped
+`.env.bak-*` backup before every write — restart the hub to apply changes.
+
+## LibreEcho speaker version
+
+Installed: 0.14.5. Latest stable: **0.14.6** (17 Nov 2026). An in-place signed
+OTA upgrade is safe via the control centre's
+**System → System update → Check for updates**; do not hand-upload the OTA file
+(known broken in 0.14.6). 0.14.6 fixes Sendspin resume-after-voice and Wi-Fi
+pauses that affect this setup. Full assessment, pre-upgrade checklist and
+Olive-specific smoke tests: `docs/LIBREECHO-UPGRADE-2026-11-23.md`.
 
 ## Configuration
 
