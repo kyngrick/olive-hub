@@ -31,7 +31,7 @@ restart everything.
 
 ---
 
-## 2026-11-24 02:30 — OTA attempt FAILED, recovery required
+## 2026-11-24 03:00 — OTA outcome: 0.14.6 rejected by device, 0.14.5 restored
 
 - With user approval, backed up speaker config and attempted 0.14.6 OTA.
 - Pre-existing `update-held-after-rollback` blocked check/apply; manual signed
@@ -46,7 +46,14 @@ restart everything.
   unprivileged). No HTTP endpoint exists to confirm/select boot slot.
 - PC hub/dashboard unaffected and healthy (98 intents). Full status and
   user-action recovery steps in `OTA-RECOVERY-2026-11-24.md`.
-- **Do not use voice until the control-centre rollback/repair is done.**
+- **Update:** after two reboots the bootloader rolled back to 0.14.5 with all
+  features ready and boot confirmed. Retried the supported signed flow via the
+  dev channel (also 0.14.6): check → apply succeeded with feature payloads, but
+  after reboot 0.14.6 again showed `pending-manifest`, wake unavailable, and
+  rolled back. Conclusion: 0.14.6 fails feature-manifest validation on this
+  radar_puffin image — a firmware defect. Final state: 0.14.5, features ready,
+  wake working, stable channel, all diagnostics OK. Stay on 0.14.5. Full details
+  in `OTA-RECOVERY-2026-11-24.md`.
 
 ---
 
