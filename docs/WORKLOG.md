@@ -31,6 +31,25 @@ restart everything.
 
 ---
 
+## 2026-11-24 02:30 — OTA attempt FAILED, recovery required
+
+- With user approval, backed up speaker config and attempted 0.14.6 OTA.
+- Pre-existing `update-held-after-rollback` blocked check/apply; manual signed
+  upload of the official 0.14.6 OTA installed the **base image only**
+  (feature payloads are separate assets downloaded by check/apply).
+- Device now reports 0.14.6 with `features_state=degraded / pending-manifest`
+  and **wake-word service unavailable** (`libreecho-waked` not running).
+  Update state failed; boot record pending/unconfirmed.
+- Repair attempts: dev-channel candidate (also 0.14.6) failed signature/
+  installation verification; stable apply still held; 0.14.5 restore upload
+  rejected `boot_store_not_committed`; bootctl confirm needs root (SSH user
+  unprivileged). No HTTP endpoint exists to confirm/select boot slot.
+- PC hub/dashboard unaffected and healthy (98 intents). Full status and
+  user-action recovery steps in `OTA-RECOVERY-2026-11-24.md`.
+- **Do not use voice until the control-centre rollback/repair is done.**
+
+---
+
 ## 2026-11-24 01:50 — audit + authorised hub-side fixes
 
 - Delivered read-only diagnostic report `EXPANSION-AND-AUDIT-PLAN-2026-11-24.md`
