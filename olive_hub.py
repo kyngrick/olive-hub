@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
-Olive Hub — voice / music / automation orchestrator for the LibreEcho speaker.
+Olive Hub â€” voice / music / automation orchestrator for the LibreEcho speaker.
 
 Replaces the fast-path chain in New_pipe2.py with:
 
@@ -74,6 +74,11 @@ from tv import TvControl
 from iot import IotRegistry
 
 SCHEDULE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "olive_schedule.json")
+DELIVERY_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "olive_notifications.jsonl")
+SCHEDULER_STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "olive_scheduler_state.json")
+SCHEDULER_TICK_SECONDS = 5
+CALENDAR_SYNC_SECONDS = 600
+BRIEFING_HOUR = 7
 
 try:  # Wyoming is only needed for the voice front-end
     from wyoming.server import AsyncEventHandler, AsyncTcpServer
@@ -197,7 +202,7 @@ class Settings:
     ha_token: str = ""
     ha_timeout: float = 5.0
 
-    # Tuya (optional, direct — no Home Assistant)
+    # Tuya (optional, direct â€” no Home Assistant)
     tuya_region: str = "eu"
     tuya_api_key: str = ""
     tuya_api_secret: str = ""
@@ -1699,7 +1704,7 @@ class Weather:
             if highs and lows:
                 text += f". Oggi da {round(lows[0])} a {round(highs[0])} gradi"
             if rain:
-                text += f", {round(rain[0])} percento probabilità di pioggia"
+                text += f", {round(rain[0])} percento probabilitÃ  di pioggia"
             return text + "."
         text = (
             f"It's {round(temp)} degrees {unit} in {resolved}, "
@@ -1783,7 +1788,7 @@ class Knowledge:
 
 
 def safe_math(expression: str) -> Optional[float]:
-    """Evaluate arithmetic only — never eval() a transcript."""
+    """Evaluate arithmetic only â€” never eval() a transcript."""
     allowed_bin = {ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod, ast.FloorDiv}
     allowed_unary = {ast.UAdd, ast.USub}
 
@@ -1879,6 +1884,14 @@ class ScheduleItem:
     repeat: str = ""  # daily | weekdays | weekends | weekly
     repeat_hour: int = 0
     repeat_minute: int = 0
+    trace_id: str = ""
+    created_at: float = 0.0
+    status: str = "pending"          # pending | delivering | delivered | cancelled
+    delivered_at: float = 0.0
+    delivery_error: str = ""
+    attempts: int = 0
+    source: str = "voice"            # voice | calendar | system
+    timezone: str = "Europe/Rome"
 
 
 def _parse_recurrence(text: str) -> tuple[str, int, int, str]:
@@ -1941,7 +1954,11 @@ class Scheduler:
         self.action_fn = action_fn
         self.items: dict[str, ScheduleItem] = {}
         self._task: Optional[asyncio.Task] = None
+        self._calendar_task: Optional[asyncio.Task] = None
+        self._lock = asyncio.Lock()
+        self.state: dict[str, Any] = {}
         self.load()
+        self._load_state()
         self._drop_expired()
 
     def load(self) -> None:
@@ -1960,23 +1977,74 @@ class Scheduler:
                                     str(row.get("action", "")), str(row.get("target", "")),
                                     str(row.get("repeat", "")),
                                     int(row.get("repeat_hour", 0) or 0),
-                                    int(row.get("repeat_minute", 0) or 0))
+                                    int(row.get("repeat_minute", 0) or 0),
+                                    str(row.get("trace_id", "")),
+                                    float(row.get("created_at", 0) or 0),
+                                    str(row.get("status", "pending")),
+                                    float(row.get("delivered_at", 0) or 0),
+                                    str(row.get("delivery_error", "")),
+                                    int(row.get("attempts", 0) or 0),
+                                    str(row.get("source", "voice")),
+                                    str(row.get("timezone", "Europe/Rome")))
             except (KeyError, TypeError, ValueError):
                 continue
             self.items[item.id] = item
 
     def _save(self) -> None:
+        tmp = self.path + ".tmp"
         try:
-            with open(self.path, "w", encoding="utf-8") as handle:
+            with open(tmp, "w", encoding="utf-8") as handle:
                 json.dump([item.__dict__ for item in self.items.values()], handle, indent=2)
+            os.replace(tmp, self.path)
         except Exception as exc:
             log.warning("schedule save failed: %s", exc)
 
+    def _load_state(self) -> None:
+        try:
+            with open(SCHEDULER_STATE, encoding="utf-8-sig") as handle:
+                self.state = json.load(handle)
+        except Exception:
+            self.state = {}
+
+    def _save_state(self) -> None:
+        tmp = SCHEDULER_STATE + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(self.state, handle, indent=2)
+            os.replace(tmp, SCHEDULER_STATE)
+        except Exception as exc:
+            log.warning("scheduler state save failed: %s", exc)
+
+    def log_delivery(self, item: ScheduleItem, ok: bool, voice: str = "",
+                     error: str = "") -> None:
+        """Append an auditable notification record (no raw audio, no secrets)."""
+        record = {
+            "at": dt.datetime.now(LOCAL_TZ).isoformat(),
+            "trace_id": item.trace_id,
+            "item_id": item.id,
+            "kind": item.kind,
+            "due_at": dt.datetime.fromtimestamp(item.due_at, LOCAL_TZ).isoformat(),
+            "label": item.label[:120],
+            "announce": item.announce[:200],
+            "speaker": str(getattr(self.speech, "speaker_name", "LibreEcho")),
+            "voice": voice,
+            "delivered": bool(ok),
+            "attempts": item.attempts,
+            "error": error[:200],
+        }
+        try:
+            with open(DELIVERY_LOG, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            log.warning("delivery log write failed: %s", exc)
+        log.info("delivery trace=%s kind=%s ok=%s voice=%s error=%s",
+                 item.trace_id, item.kind, ok, voice, error[:120])
+
     def _drop_expired(self) -> None:
-        """Anything more than a minute late when the hub starts is stale."""
-        cutoff = time.time() - 60
+        """Drop very old undelivered items; keep recent ones for recovery."""
+        cutoff = time.time() - 12 * 3600
         stale = [k for k, item in self.items.items()
-                 if item.due_at <= cutoff and item.kind != "alarm"]
+                 if item.due_at <= cutoff and not item.delivered_at]
         for key in stale:
             self.items.pop(key, None)
         if stale:
@@ -1986,24 +2054,61 @@ class Scheduler:
         return sorted((i for i in self.items.values() if kind is None or i.kind == kind),
                       key=lambda i: i.due_at)
 
+    async def _deliver(self, item: ScheduleItem, recovered: bool = False) -> None:
+        """Deliver one event exactly once, then record the outcome."""
+        async with self._lock:
+            if item.status == "delivered" or item.delivered_at:
+                return
+            item.status = "delivering"
+            item.attempts += 1
+            self._save()
+            ok, error = True, ""
+            voice = self.voice_in_use()
+            try:
+                if item.announce:
+                    prefix = "Sorry to interrupt. " if recovered else ""
+                    await self.speech.say(prefix + item.announce)
+                if item.action and self.action_fn:
+                    await self._safe_action(item)
+            except Exception as exc:
+                ok, error = False, str(exc)
+                log.warning("scheduled delivery failed id=%s: %s", item.id, exc)
+            item.status = "delivered" if ok else "pending"
+            if ok:
+                item.delivered_at = time.time()
+            else:
+                item.delivery_error = error
+            self.log_delivery(item, ok, voice, error)
+            self.items.pop(item.id, None)
+            if ok and item.repeat and item.kind in ("reminder", "alarm"):
+                next_due = _next_repeat(item, dt.datetime.now(LOCAL_TZ))
+                if next_due is not None:
+                    item.due_at = next_due
+                    item.status = "pending"
+                    item.delivered_at = 0.0
+                    item.attempts = 0
+                    item.trace_id = uuid.uuid4().hex[:12]
+                    self.items[item.id] = item
+            self._save()
+
+    def voice_in_use(self) -> str:
+        try:
+            from voice_personas import load as personas_load
+            data = personas_load()
+            key = data.get("active") or ""
+            persona = (data.get("personas") or {}).get(key) or {}
+            return str(persona.get("voice") or "default")
+        except Exception:
+            return "default"
+
     async def _loop(self) -> None:
         while True:
             try:
                 now = time.time()
                 for item in [i for i in self.items.values() if i.due_at <= now]:
-                    self.items.pop(item.id, None)
-                    if item.repeat and item.kind in ("reminder", "alarm"):
-                        next_due = _next_repeat(item, dt.datetime.now(LOCAL_TZ))
-                        if next_due is not None:
-                            item.due_at = next_due.timestamp()
-                            self.items[item.id] = item
-                    self._save()
-                    log.info("scheduler firing %s %r", item.kind, item.announce)
-                    if item.announce:
-                        asyncio.create_task(self.speech.say(item.announce))
-                    if item.action and self.action_fn:
-                        asyncio.create_task(self._safe_action(item))
-                await asyncio.sleep(1.0)
+                    recovered = item.created_at > 0 and now - item.due_at > 60
+                    await self._deliver(item, recovered)
+                await asyncio.sleep(SCHEDULER_TICK_SECONDS)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -2017,24 +2122,92 @@ class Scheduler:
         except Exception as exc:
             log.warning("scheduled action %s failed: %s", item.id, exc)
 
+    async def _calendar_loop(self) -> None:
+        """Daily 7 AM briefing + periodic sync + 15-minute appointment notices."""
+        await asyncio.sleep(10)
+        while True:
+            try:
+                now = dt.datetime.now(LOCAL_TZ)
+                self.state["last_calendar_sync"] = time.time()
+                self._save_state()
+                events = events_for(now.date()) + events_for(now.date() + dt.timedelta(days=1))
+                # 15-minute notices, once per event.
+                for ev in events:
+                    when = ev.get("start") or ev.get("when") or ev.get("time")
+                    key = str(ev.get("uid") or ev.get("id") or "")
+                    if not when or not key:
+                        continue
+                    try:
+                        start = dt.datetime.fromisoformat(str(when).replace("Z", "+00:00"))
+                        if start.tzinfo is None:
+                            start = start.replace(tzinfo=LOCAL_TZ)
+                    except Exception:
+                        continue
+                    lead = (start - now).total_seconds()
+                    notice_key = "notice:" + key
+                    if 0 < lead <= 900 and notice_key not in self.state:
+                        title = str(ev.get("summary") or ev.get("title") or "appointment")
+                        await self.speech.say(f"You have an appointment in 15 minutes: {title}.")
+                        self.state[notice_key] = time.time()
+                        self._save_state()
+                # Daily briefing at 07:00 (or on start if missed and not done).
+                today_key = "briefing:" + now.strftime("%Y-%m-%d")
+                if now.hour >= BRIEFING_HOUR and today_key not in self.state:
+                    parts = ["Good morning."]
+                    today_events = events_for(now.date())
+                    if today_events:
+                        parts.append(f"You have {len(today_events)} appointment"
+                                     f"{'s' if len(today_events) != 1 else ''} today.")
+                        first = today_events[0]
+                        title = str(first.get("summary") or first.get("title") or "")
+                        when = first.get("start") or first.get("when") or first.get("time")
+                        if when:
+                            parts.append(f"Your first is {title} at {str(when)[-5:]}.")
+                    pending = [i for i in self.items.values() if i.kind == "reminder"]
+                    if pending:
+                        parts.append(f"You have {len(pending)} outstanding reminder"
+                                     f"{'s' if len(pending) != 1 else ''}.")
+                    if len(parts) > 1:
+                        await self.speech.say(" ".join(parts))
+                        self.log_delivery(ScheduleItem("briefing", "briefing", time.time(),
+                            "morning briefing", " ".join(parts), trace_id=uuid.uuid4().hex[:12]),
+                            True, self.voice_in_use())
+                    self.state[today_key] = time.time()
+                    self._save_state()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("calendar monitor: %s", exc)
+            await asyncio.sleep(CALENDAR_SYNC_SECONDS)
+
     async def start(self) -> None:
         if not self._task:
             self._task = asyncio.create_task(self._loop())
+        if not self._calendar_task:
+            self._calendar_task = asyncio.create_task(self._calendar_loop())
 
     async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
-            with contextlib.suppress(Exception):
-                await self._task
-            self._task = None
+        for task in (self._task, self._calendar_task):
+            if task:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+        self._task = None
+        self._calendar_task = None
 
     async def add(self, kind: str, due_at: float, label: str, announce: str,
                   action: str = "", target: str = "", repeat: str = "",
-                  repeat_hour: int = 0, repeat_minute: int = 0) -> ScheduleItem:
-        item = ScheduleItem(uuid.uuid4().hex[:8], kind, due_at, label, announce,
-                            action, target, repeat, repeat_hour, repeat_minute)
+                  repeat_hour: int = 0, repeat_minute: int = 0,
+                  source: str = "voice") -> ScheduleItem:
+        item = ScheduleItem(uuid.uuid4().hex[:12], kind, due_at, label, announce,
+                            action, target, repeat, repeat_hour, repeat_minute,
+                            trace_id=uuid.uuid4().hex[:12],
+                            created_at=time.time(), status="pending", source=source)
         self.items[item.id] = item
         self._save()
+        log.info("scheduled %s id=%s trace=%s due=%s kind=%s",
+                 kind, item.id, item.trace_id,
+                 dt.datetime.fromtimestamp(due_at, LOCAL_TZ).isoformat(), kind)
         return item
 
     async def cancel(self, kind: Optional[str] = None) -> int:
@@ -2078,6 +2251,7 @@ class Context:
     conversation: Conversation = field(default_factory=Conversation)
     pending: Optional[dict[str, Any]] = None  # clarification awaiting an answer
     follow_up_depth: int = 0  # consecutive empty/wake-only turns
+    trace_id: str = ""        # request correlation id
     last_intent: str = ""     # intent of the last spoken turn (follow-up gate)
     follow_up_window: float = 0.0  # monotonic deadline of a hub-opened mic window
     recent_speech: list[tuple[float, str]] = field(default_factory=list)
@@ -2117,10 +2291,10 @@ def normalise(text: str) -> str:
 # final voice choice from the spoken text, so this only needs to be reliable
 # enough to keep an Italian question from getting an English answer.
 _ITALIAN_HINTS = {
-    "ciao", "buongiorno", "buonasera", "grazie", "perché", "perche", "come",
+    "ciao", "buongiorno", "buonasera", "grazie", "perchÃ©", "perche", "come",
     "stai", "sono", "sei", "questo", "quella", "oggi", "domani", "metti",
     "accendi", "spegni", "che", "ore", "della", "nel", "nella", "per", "non",
-    "più", "piu", "musica", "radio", "tempo", "meteo", "italiano", "italiana",
+    "piÃ¹", "piu", "musica", "radio", "tempo", "meteo", "italiano", "italiana",
     "mi", "ti", "una", "un", "di", "da", "voglio", "puoi", "per favore",
 }
 
@@ -2154,7 +2328,7 @@ def correct_common_asr(text: str) -> str:
     """Fix recurring Whisper mishearings that change the meaning of a command.
 
     'alarm' is often transcribed as 'timer'. When the phrase contains a clock
-    time or a day word it is an alarm, not a duration timer — and the speaker's
+    time or a day word it is an alarm, not a duration timer â€” and the speaker's
     own timer parser would otherwise answer "how long?" and never reach us.
     """
     out = str(text or "").strip()
@@ -2168,9 +2342,9 @@ def correct_common_asr(text: str) -> str:
 
 
 def _looks_italian(text: str) -> bool:
-    words = set(re.findall(r"[a-zàèìòù]+", str(text or "").lower()))
+    words = set(re.findall(r"[a-zÃ Ã¨Ã¬Ã²Ã¹]+", str(text or "").lower()))
     score = len(words & _ITALIAN_HINTS)
-    if any(ch in str(text) for ch in "àèìòù"):
+    if any(ch in str(text) for ch in "Ã Ã¨Ã¬Ã²Ã¹"):
         score += 2
     return score >= 2
 
@@ -2179,7 +2353,7 @@ def _looks_italian(text: str) -> bool:
 # "play that station".
 QUESTION_START = re.compile(
     r"^(?:who|what|when|where|why|how|which|is|are|was|were|do|does|did|"
-    r"can|could|would|will|should|tell me|chi|cosa|quando|dove|perche|perché)\b",
+    r"can|could|would|will|should|tell me|chi|cosa|quando|dove|perche|perchÃ©)\b",
     re.IGNORECASE,
 )
 
@@ -2241,8 +2415,8 @@ async def h_time(text: str, match, ctx: Context) -> Reply:
 
 
 _ITALIAN_DAYS = {
-    "Monday": "lunedì", "Tuesday": "martedì", "Wednesday": "mercoledì",
-    "Thursday": "giovedì", "Friday": "venerdì", "Saturday": "sabato",
+    "Monday": "lunedÃ¬", "Tuesday": "martedÃ¬", "Wednesday": "mercoledÃ¬",
+    "Thursday": "giovedÃ¬", "Friday": "venerdÃ¬", "Saturday": "sabato",
     "Sunday": "domenica",
 }
 _ITALIAN_MONTHS = {
@@ -2258,7 +2432,7 @@ async def h_date(text: str, match, ctx: Context) -> Reply:
     if _looks_italian(text):
         day = _ITALIAN_DAYS.get(today.strftime("%A"), today.strftime("%A"))
         month = _ITALIAN_MONTHS.get(today.strftime("%B"), today.strftime("%B"))
-        return Reply(f"Oggi è {day}, {today.day} {month} {today.year}.", intent="date")
+        return Reply(f"Oggi Ã¨ {day}, {today.day} {month} {today.year}.", intent="date")
     return Reply(f"Today is {today.strftime('%A, %B %d, %Y')}.", intent="date")
 
 
@@ -2653,9 +2827,9 @@ async def h_volume(text: str, match, ctx: Context) -> Reply:
     groups = match.groupdict() if match else {}
     direction = (groups.get("direction") or "").lower()
     if not direction:
-        if re.search(r"\b(up|raise|increase|louder|alza|alzare|su|piu forte|più forte)\b", text):
+        if re.search(r"\b(up|raise|increase|louder|alza|alzare|su|piu forte|piÃ¹ forte)\b", text):
             direction = "up"
-        elif re.search(r"\b(down|lower|decrease|quieter|softer|abbassa|abbassare|giu|giù|piu piano|più piano)\b", text):
+        elif re.search(r"\b(down|lower|decrease|quieter|softer|abbassa|abbassare|giu|giÃ¹|piu piano|piÃ¹ piano)\b", text):
             direction = "down"
     if direction:
         current = await ctx.device.current_volume()
@@ -2709,12 +2883,20 @@ async def h_timer_set(text: str, match, ctx: Context) -> Reply:
         ctx.pending = {"kind": "timer", "expires": time.monotonic() + ctx.settings.pending_ttl}
         return Reply("How long should the timer be?", intent="timer.set")
     label = (groups.get("label") or pretty_duration(seconds)).strip()
-    await ctx.device.add_timer(seconds, label)
+    due = dt.datetime.now(LOCAL_TZ) + dt.timedelta(seconds=seconds)
+    await ctx.scheduler.add("timer", due.timestamp(), f"timer {label}",
+                            f"Your {pretty_duration(seconds)} timer has finished.",
+                            source="voice")
     return Reply(f"Timer set for {pretty_duration(seconds)}.", intent="timer.set")
 
 
 async def h_timer_list(text: str, match, ctx: Context) -> Reply:
-    timers = await ctx.device.list_timers()
+    timers = [i.__dict__ for i in ctx.scheduler.list("timer")]
+    if not timers:
+        try:
+            timers = await ctx.device.list_timers()
+        except Exception:
+            timers = []
     if not timers:
         return Reply("No timers running.", intent="timer.list")
     parts = []
@@ -2732,6 +2914,11 @@ async def h_timer_list(text: str, match, ctx: Context) -> Reply:
 
 
 async def h_timer_cancel(text: str, match, ctx: Context) -> Reply:
+    scheduled = ctx.scheduler.list("timer")
+    for item in scheduled:
+        ctx.scheduler.items.pop(item.id, None)
+    if scheduled:
+        ctx.scheduler._save()
     timers = await ctx.device.list_timers()
     if not timers:
         return Reply("There's no timer to cancel.", intent="timer.cancel")
@@ -3091,9 +3278,10 @@ async def h_alarm_set(text: str, match, ctx: Context) -> Reply:
     if wait <= 0:
         wait += 86400
     label = f"alarm {target:%Y-%m-%d %H:%M}"
-    # The device timer is the reliable ringer; the hub keeps a record only.
-    await ctx.device.add_timer(wait, label)
-    await ctx.scheduler.add("alarm", target.timestamp(), label, "")
+    # Alarms are their own typed scheduled entity. They never become device timers.
+    await ctx.scheduler.add("alarm", target.timestamp(), label,
+                            f"Good morning. It is {target:%H:%M}. Your alarm is going off.",
+                            source="voice")
     pretty = target.strftime("%H:%M") if target.date() == dt.date.today() else target.strftime("%A %H:%M")
     return Reply(f"Alarm set for {pretty}.", intent="alarm.set")
 
@@ -3637,7 +3825,7 @@ def speak_phone(value: str) -> str:
 def wa_message_from(text: str) -> str:
     body = re.sub(r"^\s*(?:saying|that says|message|text)\s*", "", text,
                   flags=re.IGNORECASE).strip()
-    return body.strip(" \"'“”‘’ ") if body else ""
+    return body.strip(" \"'â€œâ€â€˜â€™ ") if body else ""
 
 
 def wa_display(candidate: dict) -> str:
@@ -3748,7 +3936,7 @@ async def h_whatsapp_contacts(text: str, match, ctx: Context) -> Reply:
 
 async def h_clone_start(text: str, match, ctx: Context) -> Reply:
     _VOICE_CAPTURE.update(active=True, chunks=[], path="")
-    return Reply("Clone mode armed. Say a short sentence — about five seconds — "
+    return Reply("Clone mode armed. Say a short sentence â€” about five seconds â€” "
                  "and I'll save your voice as a new persona.", intent="voice.clone")
 
 
@@ -3757,7 +3945,7 @@ async def h_clone_status(text: str, match, ctx: Context) -> Reply:
         return Reply("Clone mode is armed and waiting for your voice sample.",
                      intent="voice.clone.status")
     if _VOICE_CAPTURE.get("path"):
-        return Reply("Sample captured. Waiting for a name — who is this?",
+        return Reply("Sample captured. Waiting for a name â€” who is this?",
                      intent="voice.clone.status")
     personas = voices.all_personas()
     return Reply(f"Clone mode is idle. {len(personas)} saved voice(s). "
@@ -3882,7 +4070,7 @@ async def h_personal_fact(text: str, match, ctx: Context) -> Reply:
         memory.remember(key, value)
         return Reply(f"I'll remember that your {key.lower()} is {value}.", intent="facts.remember")
 
-    # "I like jazz" — keep it short. Long ASR-garbled clauses used to be stored
+    # "I like jazz" â€” keep it short. Long ASR-garbled clauses used to be stored
     # as both a fact and a note and then injected into every LLM prompt.
     inner = re.search(r"\bI\s+(?:like|love|prefer)\s+(.+)", text, re.IGNORECASE)
     if inner and memory:
@@ -3941,7 +4129,7 @@ async def h_tv_volume(text: str, match, ctx: Context) -> Reply:
             result = await ctx.tv.cast_volume(level=int(level.group(1)))
         elif re.search(r"\b(up|raise|increase|alza|alzare|su)\b", low):
             result = await ctx.tv.cast_volume(direction="up")
-        elif re.search(r"\b(down|lower|decrease|abbassa|abbassare|giu|giù)\b", low):
+        elif re.search(r"\b(down|lower|decrease|abbassa|abbassare|giu|giÃ¹)\b", low):
             result = await ctx.tv.cast_volume(direction="down")
         else:
             result = await ctx.tv.cast_volume()
@@ -4165,7 +4353,7 @@ async def h_volume_relative(text: str, match, ctx: Context) -> Reply:
         return Reply("I couldn't read the speaker volume.", intent="volume.relative")
     hit = re.search(r"\d{1,3}", text)
     step = int(hit.group(0)) if hit else 10
-    direction = -1 if re.search(r"\b(down|lower|decrease|less|giù|abbassa)\b", text, re.I) else 1
+    direction = -1 if re.search(r"\b(down|lower|decrease|less|giÃ¹|abbassa)\b", text, re.I) else 1
     target = max(0, min(100, current + step * direction))
     try:
         await ctx.device.set_volume(target)
@@ -4303,6 +4491,101 @@ async def h_routine_goodmorning(text: str, match, ctx: Context) -> Reply:
             log.debug("goodmorning power on failed: %s", exc)
     return Reply(f"Good morning. Turned on {changed} local device(s). " +
                  (await h_briefing(text, match, ctx)).text, intent="routine.goodmorning")
+
+
+
+# ---- typed status / calendar / system handlers ---------------------------
+async def h_alarm_status(text: str, match, ctx: Context) -> Reply:
+    items = ctx.scheduler.list("alarm")
+    if not items:
+        return Reply("There are no alarms set.", intent="alarm.status")
+    parts = [dt.datetime.fromtimestamp(i.due_at, LOCAL_TZ).strftime("%H:%M") for i in items[:5]]
+    return Reply("Alarms: " + ", ".join(parts) + ".", intent="alarm.status")
+
+
+async def h_timer_status(text: str, match, ctx: Context) -> Reply:
+    return await h_timer_list(text, match, ctx)
+
+
+async def h_reminder_status(text: str, match, ctx: Context) -> Reply:
+    return await h_schedule_list("reminders", None, ctx)
+
+
+async def h_calendar_today(text: str, match, ctx: Context) -> Reply:
+    summary = await get_today_events(ctx.http)
+    return Reply(summary or "No calendar events today.", intent="calendar.today")
+
+
+async def h_calendar_tomorrow(text: str, match, ctx: Context) -> Reply:
+    rows = events_for(dt.date.today() + dt.timedelta(days=1))
+    if not rows:
+        return Reply("Nothing in the calendar for tomorrow.", intent="calendar.tomorrow")
+    parts = [str(r.get("summary") or r.get("title") or "event") +
+             (" at " + str(r.get("start") or r.get("when") or r.get("time"))[-5:]
+              if (r.get("start") or r.get("when") or r.get("time")) else "")
+             for r in rows[:5]]
+    return Reply("Tomorrow: " + "; ".join(parts) + ".", intent="calendar.tomorrow")
+
+
+async def h_calendar_sync(text: str, match, ctx: Context) -> Reply:
+    await get_today_events(ctx.http)
+    count = len(events_for(dt.date.today()))
+    return Reply(f"Calendar checked. {count} event(s) today.", intent="calendar.sync")
+
+
+async def h_calendar_briefing(text: str, match, ctx: Context) -> Reply:
+    return await h_briefing(text, match, ctx)
+
+
+async def h_scheduler_status(text: str, match, ctx: Context) -> Reply:
+    items = ctx.scheduler.list()
+    nxt = items[0] if items else None
+    when = (dt.datetime.fromtimestamp(nxt.due_at, LOCAL_TZ).strftime("%H:%M")
+            if nxt else "none")
+    return Reply(
+        f"Scheduler running, tick every {SCHEDULER_TICK_SECONDS} seconds. "
+        f"{len(items)} pending event(s). Next: {when}.",
+        intent="system.scheduler.status")
+
+
+async def h_scheduler_test(text: str, match, ctx: Context) -> Reply:
+    due = dt.datetime.now(LOCAL_TZ) + dt.timedelta(seconds=5)
+    item = await ctx.scheduler.add("system", due.timestamp(), "scheduler test",
+                                   "Scheduler test complete.", source="system")
+    return Reply(f"Scheduler test queued, trace {item.trace_id}.", intent="system.scheduler.test")
+
+
+async def h_notifications_status(text: str, match, ctx: Context) -> Reply:
+    try:
+        rows = open(DELIVERY_LOG, encoding="utf-8").read().splitlines()[-5:]
+    except Exception:
+        rows = []
+    failed = sum(1 for r in rows if '"delivered": false' in r)
+    return Reply(f"Notification log has {len(rows)} recent entr"
+                 f"{'y' if len(rows) == 1 else 'ies'}, {failed} failure(s).",
+                 intent="system.notifications.status")
+
+
+async def h_notifications_test(text: str, match, ctx: Context) -> Reply:
+    due = dt.datetime.now(LOCAL_TZ) + dt.timedelta(seconds=3)
+    item = await ctx.scheduler.add("system", due.timestamp(), "notification test",
+                                   "This is a notification test.", source="system")
+    return Reply(f"Notification test queued, trace {item.trace_id}.", intent="system.notifications.test")
+
+
+async def h_system_calendar_status(text: str, match, ctx: Context) -> Reply:
+    last = ctx.scheduler.state.get("last_calendar_sync")
+    age = int(time.time() - last) if last else -1
+    return Reply(f"Calendar monitor active. Last sync {age} seconds ago. "
+                 f"Daily briefing at {BRIEFING_HOUR}:00.", intent="system.calendar.status")
+
+
+async def h_system_reminders_status(text: str, match, ctx: Context) -> Reply:
+    reminders = ctx.scheduler.list("reminder")
+    alarms = ctx.scheduler.list("alarm")
+    timers = ctx.scheduler.list("timer")
+    return Reply(f"Reminders: {len(reminders)}, alarms: {len(alarms)}, timers: {len(timers)}.",
+                 intent="system.reminders.status")
 
 
 INTENTS: list[Intent] = [
@@ -4562,7 +4845,7 @@ INTENTS: list[Intent] = [
         r"\bwhat'?s?\s+(?:my|your|the)\s+(?:current\s+)?location\b",
         r"\bwhere\s+(?:am\s+i|are\s+we|are\s+you)\b",
         r"\bmy\s+(?:current\s+)?(?:location|position)\b",
-        r"\bqual'?\s*[èe]\s+la\s+mia\s+posizione\b",
+        r"\bqual'?\s*[Ã¨e]\s+la\s+mia\s+posizione\b",
         r"\bdove\s+(?:siamo|sono)\b",
     ), h_location),
     Intent("trains", compile_all(
@@ -4667,6 +4950,19 @@ INTENTS: list[Intent] = [
         r"\bgood\s?morning\b",
         r"\b(?:run|start)\s+(?:the\s+)?good\s?morning\s+routine\b",
     ), h_routine_goodmorning),
+    Intent("alarm.status", compile_all(r"\balarm\s+status\b", r"\bstatus\s+of\s+(?:my\s+)?alarms?\b"), h_alarm_status),
+    Intent("timer.status", compile_all(r"\btimer\s+status\b", r"\b(?:how much time|time left)\b"), h_timer_status),
+    Intent("reminder.status", compile_all(r"\breminder\s+status\b", r"\bstatus\s+of\s+(?:my\s+)?reminders?\b"), h_reminder_status),
+    Intent("calendar.today", compile_all(r"\b(?:today'?s?|todays)\s+(?:calendar|appointments?|events?)\b", r"\bwhat'?s?\s+(?:on|in)\s+(?:my\s+)?calendar\s+today\b"), h_calendar_today),
+    Intent("calendar.tomorrow", compile_all(r"\btomorrow'?s?\s+(?:calendar|appointments?|events?)\b", r"\bwhat'?s?\s+(?:on|in)\s+(?:my\s+)?calendar\s+tomorrow\b"), h_calendar_tomorrow),
+    Intent("calendar.sync", compile_all(r"\b(?:sync|synchroni[sz]e|refresh|check)\s+(?:my\s+)?calendar\b"), h_calendar_sync),
+    Intent("calendar.briefing", compile_all(r"\b(?:calendar|morning)\s+briefing\b"), h_calendar_briefing),
+    Intent("system.scheduler.status", compile_all(r"\bscheduler\s+status\b", r"\bsystem\s+scheduler\b"), h_scheduler_status),
+    Intent("system.scheduler.test", compile_all(r"\btest\s+(?:the\s+)?scheduler\b"), h_scheduler_test),
+    Intent("system.notifications.status", compile_all(r"\bnotification\s+(?:status|log)\b"), h_notifications_status),
+    Intent("system.notifications.test", compile_all(r"\btest\s+(?:the\s+)?notifications?\b"), h_notifications_test),
+    Intent("system.calendar.status", compile_all(r"\bcalendar\s+monitor\s+status\b"), h_system_calendar_status),
+    Intent("system.reminders.status", compile_all(r"\breminder\s+monitor\s+status\b"), h_system_reminders_status),
     Intent(
         "calendar.add",
         compile_all(
@@ -4754,9 +5050,9 @@ INTENTS: list[Intent] = [
         compile_all(
             r"\b(?:alza|abbassa|turn (?:up|down)|raise|lower|louder|quieter)\b.*?\bvolume\b.*?\b(?P<step>\d{1,3})\b",
             r"\b(?:alza|abbassa|turn (?:up|down)|raise|lower)\b.*?\bvolume\b",
-            r"\bvolume\b.*?\b(?P<direction>up|down|su|giu|giù)\b(?:\s*(?P<step>\d{1,3}))?",
-            r"\b(?:louder|piu forte|più forte)\b",
-            r"\b(?:quieter|softer|piu piano|più piano)\b",
+            r"\bvolume\b.*?\b(?P<direction>up|down|su|giu|giÃ¹)\b(?:\s*(?P<step>\d{1,3}))?",
+            r"\b(?:louder|piu forte|piÃ¹ forte)\b",
+            r"\b(?:quieter|softer|piu piano|piÃ¹ piano)\b",
             r"\bturn (?:it )?(?:up|down)\b",
             r"\b(?:set|imposta|metti)\b.*?\bvolume\b.*?(?P<level>\d{1,3})\b",
             r"\bvolume\b.*?(?P<level>\d{1,3})\b",
@@ -4765,7 +5061,7 @@ INTENTS: list[Intent] = [
     ),
     Intent("volume.get", compile_all(r"\b(what'?s the volume|quanto e il volume|che volume c'e)\b"), h_volume),
     Intent("weather", compile_all(r"\b(weather|forecast|temperature|che tempo|meteo|piove)\b"), h_weather),
-    Intent("time", compile_all(r"\b(what time is it|what'?s the time|che ore sono|che ora e|che ora è|current time)\b"), h_time),
+    Intent("time", compile_all(r"\b(what time is it|what'?s the time|che ore sono|che ora e|che ora Ã¨|current time)\b"), h_time),
     Intent("date", compile_all(r"\b(what'?s the date|what date|what day is it|today'?s date|che giorno|che data)\b"), h_date),
     Intent("coin", compile_all(r"\b(flip a coin|coin flip|testa o croce)\b"), h_coin),
     Intent("dice", compile_all(r"\b(roll a (die|dice|d20)|tira il dado)\b"), h_dice),
@@ -4773,7 +5069,7 @@ INTENTS: list[Intent] = [
         "light.brightness",
         compile_all(
             r"\b(?:set|change|imposta|metti|porta)\b(?P<target>[^0-9]*?\b(?:light|lights|lamp|lamps|bulb|bulbs|lampada|lampadina|lampade|lightstrip)\b[^0-9]*?)\b(?:to|at|a|al)\b\s*(?P<level>\d{1,3})\s*(?:%|percent|per cent)?$",
-            r"\b(?:set|change|imposta|metti)\b.*?\b(?:brightness|luminosita|luminosità)\b.*?(?P<level>\d{1,3})\b",
+            r"\b(?:set|change|imposta|metti)\b.*?\b(?:brightness|luminosita|luminositÃ )\b.*?(?P<level>\d{1,3})\b",
             r"\b(?:dim|brighten)\b\s+(?P<target>.+)$",
         ),
         h_light_brightness,
@@ -4807,7 +5103,7 @@ INTENTS: list[Intent] = [
         ),
         h_ha_on,
     ),
-    Intent("ha.state", compile_all(r"\b(?:is|e|è)\b\s+(?P<target>.+?)\s+\b(?:on|off|acces[oa]|spent[oa])\b$"), h_ha_state),
+    Intent("ha.state", compile_all(r"\b(?:is|e|Ã¨)\b\s+(?P<target>.+?)\s+\b(?:on|off|acces[oa]|spent[oa])\b$"), h_ha_state),
     Intent("currency.convert", compile_all(
         r"\b(?:convert|how much is|what'?s|quanto fa)\b.*?\d.*?"
         r"\b(?:dollars?|euros?|pounds?|sterling|yen|francs?)\b.*?\b(?:in|to)\b",
@@ -4824,7 +5120,7 @@ INTENTS: list[Intent] = [
     ), h_math),
     Intent(
         "knowledge",
-        compile_all(r"\b(?:who is|what is|tell me about|define|where is|how do|chi e|chi è|cos'?e|cos'?è)\b"),
+        compile_all(r"\b(?:who is|what is|tell me about|define|where is|how do|chi e|chi Ã¨|cos'?e|cos'?Ã¨)\b"),
         h_knowledge,
     ),
 ]
@@ -5010,7 +5306,7 @@ COURTESY_QUESTION = re.compile(
 # A short yes/no answering a clarification the previous turn asked for.
 AFFIRMATIVE = re.compile(
     r"^(?:yes|yeah|yep|yup|sure|please|ok|okay|do it|go ahead|that'?s right|"
-    r"correct|si|sì|certo|vai|fallo)\b",
+    r"correct|si|sÃ¬|certo|vai|fallo)\b",
     re.IGNORECASE,
 )
 NEGATIVE = re.compile(
@@ -5106,8 +5402,9 @@ class Router:
             if wait <= 0:
                 wait += 86400
             label = f"alarm {target:%Y-%m-%d %H:%M}"
-            await self.ctx.device.add_timer(wait, label)
-            await self.ctx.scheduler.add("alarm", target.timestamp(), label, "")
+            await self.ctx.scheduler.add("alarm", target.timestamp(), label,
+                                         f"Good morning. It is {target:%H:%M}. Your alarm is going off.",
+                                         source="voice")
             return Reply(f"Alarm set for {target:%H:%M}.", intent="alarm.set")
         if kind == "reminder":
             target = parse_when(text, allow_bare=True)
@@ -5185,6 +5482,8 @@ class Router:
     async def route(self, text: str) -> Optional[Reply]:
         if not text.strip():
             return None
+        self.ctx.trace_id = uuid.uuid4().hex[:12]
+        log.info("trace=%s request=%r", self.ctx.trace_id, text[:120])
         text = correct_common_asr(correct_clone_phrase(text))
         clean = normalise(text)
         if FASTPATH_PREFIX in text:
@@ -5224,7 +5523,7 @@ class Router:
                 log.info("intent=%s text=%r", intent.name, clean[:80])
                 return await self._run(intent.name, intent.handler, text, hit)
 
-        # "play Groove Salad" — a station name or a genre without the word radio/station.
+        # "play Groove Salad" â€” a station name or a genre without the word radio/station.
         verb = PLAY_VERB.match(clean)
         if verb:
             tail = verb.group(1).strip()
@@ -6177,3 +6476,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

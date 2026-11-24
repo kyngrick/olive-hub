@@ -31,6 +31,27 @@ restart everything.
 
 ---
 
+## 2026-11-24 17:45 — scheduler reliability repair (full pipeline)
+
+- Root cause of alarm→timer symptom: alarms were implemented on device timers
+  with empty spoken text; plus a naive/aware datetime crash in `h_alarm_set`
+  and broken reminder text extraction.
+- Rebuilt scheduler: typed alarm/timer/reminder records, 5s tick, awaited
+  delivery under lock, JSON delivery log with trace ID / speaker / voice /
+  outcome, restart recovery with "Sorry to interrupt." prefix, atomic writes.
+- Alarms no longer create device timers; timers no longer create alarm records.
+- Added calendar monitor: startup sync + 10-min sync, 07:00 briefing, 15-min
+  appointment notices, once-only state.
+- Added request trace IDs and 13 new status/system/calendar intents (111 total).
+- Dashboard: Scheduler / notifications card + `/api/scheduler`.
+- Added `tests/test_scheduler_reliability.py` (6 tests, all pass) and ran all
+  four requested real-world tests live: alarm routing, 2-min reminder speech,
+  1-min timer speech, restart with pending reminder — all PASS, no duplicate
+  deliveries, 9/9 services healthy. Report:
+  `SCHEDULER-RELIABILITY-REPORT-2026-11-24.md`.
+
+---
+
 ## 2026-11-24 10:40 — alarm/reminder bugs fixed
 
 - User reported alarms still failing. Reproduced: intent matched but handler

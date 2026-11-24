@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Olive Hub dashboard on port 8767 (configurable with DASH_PORT).
 
 Open http://127.0.0.1:8767/ and enter the hub token (HUB_TOKEN from .env).
@@ -12,6 +12,7 @@ edited from the Configuration card; edits are backed up before being written.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 import logging
 import os
@@ -288,13 +289,13 @@ async def _voice_job_worker(job_id: str, lang: str, key: str) -> None:
     job = VOICE_JOBS[job_id]
     try:
         job["status"] = "downloading"
-        job["message"] = "Downloading voice model (can take several minutes)…"
+        job["message"] = "Downloading voice model (can take several minutes)â€¦"
         ok, msg = await asyncio.to_thread(voice_manager.install_voice, key)
         if not ok:
             job.update(status="error", message=f"Download failed: {msg}")
             return
         job["status"] = "restarting"
-        job["message"] = "Model installed. Restarting the TTS stack…"
+        job["message"] = "Model installed. Restarting the TTS stackâ€¦"
         result = await asyncio.to_thread(voice_manager.set_voice, lang, key, False)
         job.update(status="done" if result.get("ok") else "error",
                    message=result.get("message") or result.get("error") or "unknown result")
@@ -315,7 +316,7 @@ async def api_voice_set(request: web.Request) -> web.Response:
     except Exception as exc:
         return web.json_response({"ok": False, "error": f"cannot read catalog: {exc}"}, status=500)
     job_id = uuid.uuid4().hex[:12]
-    VOICE_JOBS[job_id] = {"status": "queued", "message": "Queued…", "lang": lang, "key": key}
+    VOICE_JOBS[job_id] = {"status": "queued", "message": "Queuedâ€¦", "lang": lang, "key": key}
     asyncio.create_task(_voice_job_worker(job_id, lang, key))
     return web.json_response({"ok": True, "job": job_id, "message": "Voice change started."})
 
@@ -474,6 +475,37 @@ async def api_latency(_request: web.Request) -> web.Response:
     return web.json_response(out)
 
 
+# ---- scheduler / notifications ----------------------------------------
+async def api_scheduler(_request: web.Request) -> web.Response:
+    import olive_hub as oh
+    try:
+        items = []
+        path = oh.SCHEDULE_FILE
+        if os.path.exists(path):
+            with open(path, encoding="utf-8-sig") as handle:
+                rows = json.load(handle)
+            for row in rows:
+                items.append({"kind": row.get("kind"), "label": row.get("label"),
+                              "due": dt.datetime.fromtimestamp(
+                                  float(row.get("due_at", 0)), oh.LOCAL_TZ).isoformat(),
+                              "status": row.get("status", "pending"),
+                              "trace": row.get("trace_id", "")})
+        state = {}
+        if os.path.exists(oh.SCHEDULER_STATE):
+            with open(oh.SCHEDULER_STATE, encoding="utf-8-sig") as handle:
+                state = json.load(handle)
+        deliveries = []
+        if os.path.exists(oh.DELIVERY_LOG):
+            with open(oh.DELIVERY_LOG, encoding="utf-8") as handle:
+                deliveries = [json.loads(line) for line in handle if line.strip()][-20:]
+        return web.json_response({"ok": True, "items": items, "state": state,
+                                  "deliveries": deliveries,
+                                  "tick_seconds": oh.SCHEDULER_TICK_SECONDS,
+                                  "briefing_hour": oh.BRIEFING_HOUR})
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+
 # ---- location & trains ------------------------------------------------
 async def api_location(_request: web.Request) -> web.Response:
     env = _env_lines()
@@ -577,6 +609,7 @@ def make_app() -> web.Application:
     app.router.add_post("/api/speaker", api_speaker_set)
     app.router.add_post("/api/latency", api_latency)
     app.router.add_post("/api/performance", api_performance)
+    app.router.add_get("/api/scheduler", api_scheduler)
     app.router.add_get("/api/location", api_location)
     app.router.add_get("/api/trains", api_trains)
     app.router.add_post("/api/restart", api_restart)
@@ -611,8 +644,8 @@ button{cursor:pointer}button:hover{border-color:var(--accent)}button.mini{paddin
 .orderlist label{display:flex;justify-content:space-between;align-items:center;padding:3px 0}
 .note{font-size:12px;color:var(--dim)}
 </style></head><body>
-<header><h1>OLIVE HUB · CONTROL / TEST</h1><div class="bar">
-<span id="status" class="dim">connecting…</span>
+<header><h1>OLIVE HUB Â· CONTROL / TEST</h1><div class="bar">
+<span id="status" class="dim">connectingâ€¦</span>
 <select id="logname"><option>hub</option><option>whisper</option><option>tts-router</option><option>kokoro</option><option>whatsapp</option><option>restarts</option></select>
 <button onclick="loadAll()">Refresh</button><button onclick="restartHub()">Restart hub</button>
 <button onclick="openCustomize()">Customize</button><button onclick="lock()">Change token</button>
@@ -643,7 +676,7 @@ button{cursor:pointer}button:hover{border-color:var(--accent)}button.mini{paddin
 <div class="card" id="card-features"><h2>LLM / features</h2><table id="features"></table></div>
 <div class="card" id="card-voice"><h2>Voice</h2><table id="voice"></table></div>
 <div class="card" id="card-intents"><h2>Intents (<span id="intentcount">0</span>)</h2>
-<input id="ifilter" placeholder="Filter intents…" oninput="renderIntents()" style="width:100%;margin-bottom:8px">
+<input id="ifilter" placeholder="Filter intentsâ€¦" oninput="renderIntents()" style="width:100%;margin-bottom:8px">
 <div id="intents" class="chips"></div></div>
 <div class="card" id="card-voicesel"><h2>Voice picker (Piper)</h2>
 <div class="bar" style="margin-bottom:8px"><select id="voicelang" onchange="loadVoices()"><option value="en">English</option><option value="it">Italian</option></select>
@@ -657,37 +690,39 @@ button{cursor:pointer}button:hover{border-color:var(--accent)}button.mini{paddin
 <div class="bar"><button class="mini" onclick="addCustomIntent()">Add intent</button><button class="mini" onclick="reloadIntents()">Reload</button></div>
 <div id="intenterrmsg" class="err"></div></div>
 <div class="card" id="card-speaker"><h2>Wake word / microphone</h2>
-<div id="speakerinfo" class="dim">loading…</div>
+<div id="speakerinfo" class="dim">loadingâ€¦</div>
 <div class="rowline"><label>Wake sensitivity <input id="sensval" type="number" min="0" max="100" value="67" style="width:90px"></label></div>
 <div class="rowline"><label>Mic gain <input id="gainval" type="number" min="0" max="100" value="65" style="width:90px"></label></div>
 <div class="bar"><button class="mini" onclick="applySpeaker()">Apply to speaker</button><button class="mini" onclick="loadSpeaker()">Refresh</button></div>
 <div id="speakererr" class="err"></div>
 <p class="note">Higher sensitivity = easier to wake from a distance. 0 = strictest (threshold 0.85), 100 = most sensitive (0.41). Mic gain above ~78 may introduce hiss.</p></div>
 <div class="card" id="card-perf"><h2>Response time</h2>
-<div id="perfinfo" class="dim">Measured: ASR ~2.6 s (6.7 s audio), TTS first audio ~1.2 s, LLM ~0.3–0.8 s depending on model.</div>
+<div id="perfinfo" class="dim">Measured: ASR ~2.6 s (6.7 s audio), TTS first audio ~1.2 s, LLM ~0.3â€“0.8 s depending on model.</div>
 <div class="bar" style="margin:8px 0"><button class="mini" onclick="applyPreset('fast')">Fast</button><button class="mini" onclick="applyPreset('balanced')">Balanced</button><button class="mini" onclick="applyPreset('quality')">Quality</button><button class="mini" onclick="runLatency()">Measure now</button></div>
 <div id="perfmsg" class="err"></div>
-<p class="note">Fast uses <b>qwen/qwen3.8-27b</b> (non-reasoning, multilingual, 0.3–0.8 s; good English and Italian). Quality uses gpt-oss-120b with thinking. Restart the hub after switching.</p></div>
+<p class="note">Fast uses <b>qwen/qwen3.8-27b</b> (non-reasoning, multilingual, 0.3â€“0.8 s; good English and Italian). Quality uses gpt-oss-120b with thinking. Restart the hub after switching.</p></div>
 <div class="card" id="card-travel" style="grid-column:1/-1"><h2>Travel / location</h2>
-<div id="locationinfo" class="dim">location…</div>
+<div id="locationinfo" class="dim">locationâ€¦</div>
 <div class="rowline" style="margin-top:8px"><input id="trainq" placeholder="trains from Rome to Milan tomorrow at 8" style="flex:1">
 <button class="mini" onclick="checkTrains()">Check trains</button><button class="mini" onclick="loadLocation()">Location</button></div>
 <div id="trainresult"></div></div>
+<div class="card" id="card-scheduler" style="grid-column:1/-1"><h2>Scheduler / notifications</h2>
+<div id="schedinfo" class="dim">loadingâ€¦</div><div id="scheditems"></div><div id="schedlog"></div></div>
 <div class="card" id="card-config" style="grid-column:1/-1"><h2>Configuration (.env, secrets redacted)</h2>
 <div class="cfgsave"><input id="cfgkey" placeholder="KEY"><input id="cfgval" placeholder="new value"><button class="mini" onclick="saveConfig()">Save value</button></div>
 <div id="cfgerr" class="err"></div>
-<input id="cfilter" placeholder="Filter config…" oninput="renderConfig()" style="width:100%;margin-bottom:8px">
+<input id="cfilter" placeholder="Filter configâ€¦" oninput="renderConfig()" style="width:100%;margin-bottom:8px">
 <div style="max-height:280px;overflow:auto"><table id="config"></table></div>
 <p class="note">Non-secret values only. A timestamped .env backup is made before each change; restart the hub to apply. DASH_* changes need a dashboard restart.</p></div>
-<div class="card" id="card-logs" style="grid-column:1/-1"><h2>Logs · <span id="logtitle">hub</span></h2><pre id="logs"></pre></div>
+<div class="card" id="card-logs" style="grid-column:1/-1"><h2>Logs Â· <span id="logtitle">hub</span></h2><pre id="logs"></pre></div>
 <div class="card" id="card-quick"><h2>Quick test commands</h2><pre id="quicktext"></pre></div>
-<div class="card" id="card-libreecho"><h2>LibreEcho upgrade</h2><div id="leinfo" class="dim">checking…</div></div>
+<div class="card" id="card-libreecho"><h2>LibreEcho upgrade</h2><div id="leinfo" class="dim">checkingâ€¦</div></div>
 </div></div>
 
 <script>
-const DEFAULT_COMMANDS = ".\\.venv\\Scripts\\python.exe tools\\kokoro\\test_kokoro.py\n.\\.venv\\Scripts\\python.exe tools\\kokoro\\record_and_clone.py --name Ricky\n\nAlexa clone → sample → \"Who is this?\" → \"Ricky\"\nAlexa speak like KokoroIT / KokoroEN";
-const CARD_NAMES = {services:'Hub / services',features:'LLM / features',voice:'Voice',voicesel:'Voice picker',intents:'Intents',intentedit:'Intent editor',speaker:'Wake / mic',perf:'Performance',travel:'Travel / location',config:'Configuration',logs:'Logs',quick:'Quick commands',libreecho:'LibreEcho upgrade'};
-const DEFAULT_ORDER = ['services','features','voice','voicesel','intents','intentedit','speaker','perf','travel','config','logs','quick','libreecho'];
+const DEFAULT_COMMANDS = ".\\.venv\\Scripts\\python.exe tools\\kokoro\\test_kokoro.py\n.\\.venv\\Scripts\\python.exe tools\\kokoro\\record_and_clone.py --name Ricky\n\nAlexa clone â†’ sample â†’ \"Who is this?\" â†’ \"Ricky\"\nAlexa speak like KokoroIT / KokoroEN";
+const CARD_NAMES = {services:'Hub / services',features:'LLM / features',voice:'Voice',voicesel:'Voice picker',intents:'Intents',intentedit:'Intent editor',speaker:'Wake / mic',perf:'Performance',travel:'Travel / location',scheduler:'Scheduler / notifications',config:'Configuration',logs:'Logs',quick:'Quick commands',libreecho:'LibreEcho upgrade'};
+const DEFAULT_ORDER = ['services','features','voice','voicesel','intents','intentedit','speaker','perf','travel','scheduler','config','logs','quick','libreecho'];
 const DEFAULTS = {theme:'midnight',accent:'#58a6ff',interval:5,commands:DEFAULT_COMMANDS,
   show:Object.fromEntries(DEFAULT_ORDER.map(k=>[k,true])), order:DEFAULT_ORDER.slice()};
 const THEMES = {midnight:{bg:'#0d1117',card:'#161b22',fg:'#c9d1d9'},ocean:{bg:'#071a2b',card:'#0f2942',fg:'#d6e9ff'},light:{bg:'#f6f8fa',card:'#ffffff',fg:'#1f2328'},forest:{bg:'#0b1712',card:'#13251c',fg:'#d8f3e2'}};
@@ -705,7 +740,7 @@ function loadPrefs(){
 }
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function rows(el,items){document.getElementById(el).innerHTML=items.map(r=>'<tr>'+r.map(c=>'<td>'+c+'</td>').join('')+'</tr>').join('');}
-function badge(v){return v?'<span class="ok">● up</span>':'<span class="bad">● down</span>'}
+function badge(v){return v?'<span class="ok">â— up</span>':'<span class="bad">â— down</span>'}
 
 function applyPrefs(){
   const th=THEMES[PREFS.theme]||THEMES.midnight, root=document.documentElement.style;
@@ -724,7 +759,7 @@ function openCustomize(){
   PREFS.order.forEach((id,i)=>{
     const row=document.createElement('div');row.className='rowline';
     row.innerHTML='<label><input type="checkbox" data-show="'+id+'" '+(PREFS.show[id]?'checked':'')+'> '+esc(CARD_NAMES[id])+'</label>'+
-      '<span><button class="mini" onclick="moveCard(\''+id+'\',-1)">↑</button> <button class="mini" onclick="moveCard(\''+id+'\',1)">↓</button></span>';
+      '<span><button class="mini" onclick="moveCard(\''+id+'\',-1)">â†‘</button> <button class="mini" onclick="moveCard(\''+id+'\',1)">â†“</button></span>';
     list.appendChild(row);
   });
   document.getElementById('customize').classList.remove('hidden');
@@ -760,8 +795,8 @@ async function login(e){
   if(e)e.preventDefault();
   const tok=document.getElementById('token').value.trim();
   if(!tok){showLogin('Enter the token first.');return;}
-  T=tok;showLogin('Checking token…');
-  try{DATA=await api('/api/summary');sessionStorage.setItem('olive_token',T);hideLogin();render();await loadLogs();loadVoices();loadIntents();loadSpeaker();loadLocation();}
+  T=tok;showLogin('Checking tokenâ€¦');
+  try{DATA=await api('/api/summary');sessionStorage.setItem('olive_token',T);hideLogin();render();await loadLogs();loadVoices();loadIntents();loadSpeaker();loadLocation();loadScheduler();}
   catch(err){T='';sessionStorage.removeItem('olive_token');showLogin('Token rejected. Check HUB_TOKEN in .env ('+err.message+').');}
 }
 async function localLogin(){
@@ -775,14 +810,14 @@ function lock(){sessionStorage.removeItem('olive_token');T='';DATA=null;document
 
 function render(){
   const d=DATA,h=d.hub||{},v=d.voice||{};
-  document.getElementById('status').textContent=(h.ok?'● hub online':'● hub offline')+' · '+(d.services||[]).filter(s=>s.up).length+'/'+(d.services||[]).length+' services';
+  document.getElementById('status').textContent=(h.ok?'â— hub online':'â— hub offline')+' Â· '+(d.services||[]).filter(s=>s.up).length+'/'+(d.services||[]).length+' services';
   rows('services',(d.services||[]).map(s=>[s.name,s.host+':'+s.port,badge(s.up)]));
   const f=[['LLM',h.llm?'enabled':'disabled'],['Model',h.llm_model||'-'],['Provider',(d.config.find(x=>x.key==='AI_PROVIDER')||{}).value||'-'],
     ['Music Assistant',h.music_assistant?'configured':'no'],['MA reachable',h.music_assistant_reachable?'yes':'no'],
     ['WhatsApp',(h.whatsapp_bridge||{}).status||'-'],['Calendar',h.calendar?'yes':'no'],['Flights',(h.flights||{}).provider||'-'],
     ['Memory',JSON.stringify(h.memory_counts||{})],['Routines',h.scheduled_routines??0],['Conversation turns',h.conversation_turns??0]];
   rows('features',f);
-  const personas=(v.personas||[]).map(p=>[p.name+' '+(p.active?'★':''),p.provider,p.voice,p.ready?'ready':'pending']);
+  const personas=(v.personas||[]).map(p=>[p.name+' '+(p.active?'â˜…':''),p.provider,p.voice,p.ready?'ready':'pending']);
   rows('voice',[['Active',v.active||'-','','']].concat(personas).concat([['Piper EN',v.piper_en,'',''],['Piper IT',v.piper_it,'',''],['Whisper',v.whisper_model,'',''],['Kokoro',v.kokoro_host+':'+v.kokoro_port,'','']]));
   document.getElementById('intentcount').textContent=(d.intents||[]).length;
   renderIntents();renderConfig();renderLibreEcho();
@@ -798,7 +833,7 @@ async function saveConfig(){
   const key=document.getElementById('cfgkey').value.trim(), value=document.getElementById('cfgval').value;
   const err=document.getElementById('cfgerr');
   if(!key){err.textContent='Enter a KEY.';return;}
-  err.textContent='Saving…';
+  err.textContent='Savingâ€¦';
   try{
     const r=await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key,value})});
     err.textContent=r.ok?'Saved '+key+' (backup: '+r.backup+'). Restart the hub to apply.':('Failed: '+r.error);
@@ -814,8 +849,8 @@ async function loadVoices(){
     document.getElementById('voicelist').innerHTML=(d.voices||[]).map(v=>{
       if(v.error)return '<div class="bad">'+esc(v.error)+'</div>';
       const isCur=v.key===d.current?.[lang];
-      return '<div class="rowline"><span style="flex:1">'+esc(v.name)+' <span class="dim">'+esc(v.quality)+' · '+v.size_mb+' MB · '+v.speed+'</span>'+
-        (isCur?' <span class="ok">● active</span>':'')+'</span>'+
+      return '<div class="rowline"><span style="flex:1">'+esc(v.name)+' <span class="dim">'+esc(v.quality)+' Â· '+v.size_mb+' MB Â· '+v.speed+'</span>'+
+        (isCur?' <span class="ok">â— active</span>':'')+'</span>'+
         (v.installed?'<button class="mini" onclick="useVoice(\''+lang+'\',\''+v.key+'\')">Use</button>'
                     :'<button class="mini" onclick="useVoice(\''+lang+'\',\''+v.key+'\')">Download & use</button>')+'</div>';
     }).join('');
@@ -823,7 +858,7 @@ async function loadVoices(){
 }
 async function useVoice(lang,key){
   if(!confirm('Switch '+lang.toUpperCase()+' voice to '+key+'? This restarts the TTS stack.'))return;
-  const box=document.getElementById('voicelist');box.innerHTML='Starting…';
+  const box=document.getElementById('voicelist');box.innerHTML='Startingâ€¦';
   try{
     const r=await api('/api/voice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lang,key,install:true})});
     if(!r.ok){box.innerHTML='<span class="bad">'+esc(r.error)+'</span>';return;}
@@ -841,7 +876,7 @@ async function pollVoiceJob(id,box){
 // ---- intent editor ----
 let INTENT_DATA=null;
 async function reloadIntents(){
-  const box=document.getElementById('intenterrmsg');box.textContent='Reloading…';
+  const box=document.getElementById('intenterrmsg');box.textContent='Reloadingâ€¦';
   try{
     const r=await api('/api/intents/reload',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
     box.textContent=r.ok?('Reloaded: '+r.active.length+' custom, '+r.builtins+' built-in.'):('Reload failed: '+JSON.stringify(r.errors||r.error));
@@ -893,7 +928,7 @@ async function loadSpeaker(){
   try{
     const d=await api('/api/speaker');
     if(!d.ok)throw Error(d.error);
-    document.getElementById('speakerinfo').textContent='wake='+d.wake_word+' · sensitivity '+d.sensitivity+' · gain '+d.gain+(d.muted?' · MUTED':'');
+    document.getElementById('speakerinfo').textContent='wake='+d.wake_word+' Â· sensitivity '+d.sensitivity+' Â· gain '+d.gain+(d.muted?' Â· MUTED':'');
     document.getElementById('sensval').value=d.sensitivity;document.getElementById('gainval').value=d.gain;
     document.getElementById('speakererr').textContent='';
   }catch(e){document.getElementById('speakererr').textContent=e.message;}
@@ -906,27 +941,38 @@ async function applySpeaker(){
     if(r.ok)loadSpeaker();
   }catch(e){document.getElementById('speakererr').textContent='Failed: '+e.message;}
 }
+// ---- scheduler / notifications ----
+async function loadScheduler(){
+  try{
+    const d=await api('/api/scheduler');if(!d.ok)throw Error(d.error);
+    document.getElementById('schedinfo').textContent='Tick '+d.tick_seconds+'s Â· briefing '+d.briefing_hour+':00 Â· '+(d.items||[]).length+' pending';
+    document.getElementById('scheditems').innerHTML='<table><tr><th>Kind</th><th>Label</th><th>Due</th><th>Status</th><th>Trace</th></tr>'+
+      (d.items||[]).map(i=>'<tr><td>'+esc(i.kind)+'</td><td>'+esc(i.label)+'</td><td>'+esc(i.due)+'</td><td>'+esc(i.status)+'</td><td>'+esc(i.trace)+'</td></tr>').join('')+'</table>';
+    document.getElementById('schedlog').innerHTML='<h3>Recent deliveries</h3><table><tr><th>At</th><th>Kind</th><th>Delivered</th><th>Voice</th><th>Error</th></tr>'+
+      (d.deliveries||[]).slice().reverse().map(x=>'<tr><td>'+esc(x.at)+'</td><td>'+esc(x.kind)+'</td><td>'+(x.delivered?'<span class="ok">yes</span>':'<span class="bad">no</span>')+'</td><td>'+esc(x.voice)+'</td><td>'+esc(x.error||'')+'</td></tr>').join('')+'</table>';
+  }catch(e){document.getElementById('schedinfo').textContent=e.message;}
+}
 // ---- travel / location ----
 async function loadLocation(){
   try{const d=await api('/api/location');
     document.getElementById('locationinfo').textContent=d.ok
-      ? ('Home: '+d.city+' · '+d.lat.toFixed(2)+', '+d.lon.toFixed(2)+' · nearest: '+(d.place.name||'unknown'))
+      ? ('Home: '+d.city+' Â· '+d.lat.toFixed(2)+', '+d.lon.toFixed(2)+' Â· nearest: '+(d.place.name||'unknown'))
       : ('Location error: '+d.error);
   }catch(e){document.getElementById('locationinfo').textContent=e.message;}
 }
 async function checkTrains(){
   const q=document.getElementById('trainq').value.trim(), box=document.getElementById('trainresult');
   if(!q){box.textContent='Enter a journey.';return;}
-  box.textContent='Looking up…';
+  box.textContent='Looking upâ€¦';
   try{
     const d=await api('/api/trains?text='+encodeURIComponent(q));
     if(!d.ok){box.innerHTML='<span class="bad">'+esc(d.error)+'</span>';return;}
     const rows=(d.trips||[]).map(t=>'<tr><td>'+esc(t.depart)+'</td><td>'+esc(t.arrive)+'</td><td>'+esc(t.duration)+
       '</td><td>'+t.transfers+' change'+(t.transfers===1?'':'s')+'</td><td>'+esc(t.trains)+'</td></tr>').join('');
-    box.innerHTML='<p class="dim">'+esc(d.origin)+' → '+esc(d.destination)+(d.when?' · '+esc(d.when.slice(0,16).replace('T',' ')):'')+
+    box.innerHTML='<p class="dim">'+esc(d.origin)+' â†’ '+esc(d.destination)+(d.when?' Â· '+esc(d.when.slice(0,16).replace('T',' ')):'')+
       '</p><table><tr><th>Depart</th><th>Arrive</th><th>Duration</th><th>Changes</th><th>Train</th></tr>'+rows+'</table>'+
       '<p class="note">Ticket prices are not published in the free timetable. '+
-      '<a href="'+esc(d.price_url)+'" target="_blank" rel="noopener">Check prices</a> · '+
+      '<a href="'+esc(d.price_url)+'" target="_blank" rel="noopener">Check prices</a> Â· '+
       'Timetable data: <a href="https://transitous.org/sources/" target="_blank" rel="noopener">Transitous sources</a></p>';
   }catch(e){box.innerHTML='<span class="bad">'+esc(e.message)+'</span>';}
 }
@@ -939,18 +985,18 @@ async function applyPreset(name){
   }catch(e){document.getElementById('perfmsg').textContent='Failed: '+e.message;}
 }
 async function runLatency(){
-  document.getElementById('perfmsg').textContent='Measuring…';
+  document.getElementById('perfmsg').textContent='Measuringâ€¦';
   try{
     const r=await api('/api/latency',{method:'POST'});
-    document.getElementById('perfmsg').textContent=r.ok?('ASR '+r.asr_total_s+'s · TTS first audio '+r.tts_first_audio_s+'s'):('Failed: '+r.error);
+    document.getElementById('perfmsg').textContent=r.ok?('ASR '+r.asr_total_s+'s Â· TTS first audio '+r.tts_first_audio_s+'s'):('Failed: '+r.error);
   }catch(e){document.getElementById('perfmsg').textContent='Failed: '+e.message;}
 }
 function renderLogs(){document.getElementById('logtitle').textContent=document.getElementById('logname').value;document.getElementById('logs').textContent=(LOGS||[]).join('');}
 function renderLibreEcho(){
-  document.getElementById('leinfo').innerHTML='<b>Stable: 0.14.6</b> (17 Nov 2026) · installed: 0.14.5<br>'+
-    '<span class="ok">● In-place OTA is supported</span> — no reinstall needed.<br>'+
-    'Update from the speaker control centre: <b>System › System update › Check for updates</b>.<br>'+
-    '<span class="bad">Do not</span> upload the update file by hand — broken in 0.14.6.<br>'+
+  document.getElementById('leinfo').innerHTML='<b>Stable: 0.14.6</b> (17 Nov 2026) Â· installed: 0.14.5<br>'+
+    '<span class="ok">â— In-place OTA is supported</span> â€” no reinstall needed.<br>'+
+    'Update from the speaker control centre: <b>System â€º System update â€º Check for updates</b>.<br>'+
+    '<span class="bad">Do not</span> upload the update file by hand â€” broken in 0.14.6.<br>'+
     'Relevant fixes: Sendspin resumes after voice replies/mute, Wi-Fi pauses fixed, '+
     'repeatable alarms & spoken reminders, AirPlay skip/seek fixes.<br>'+
     'Known issue: AirPlay from Music Assistant still needs Sendspin, AirPlay 2-compatibility '+
@@ -972,8 +1018,8 @@ async function restartHub(){
 document.getElementById('logname').onchange=loadLogs;
 applyPrefs();
 if(T){
-  showLogin('Checking saved token…');
-  api('/api/summary').then(d=>{DATA=d;hideLogin();render();loadLogs();loadVoices();loadIntents();loadSpeaker();loadLocation();})
+  showLogin('Checking saved tokenâ€¦');
+  api('/api/summary').then(d=>{DATA=d;hideLogin();render();loadLogs();loadVoices();loadIntents();loadSpeaker();loadLocation();loadScheduler();})
     .catch(()=>{T='';sessionStorage.removeItem('olive_token');showLogin('Saved token was rejected. Check HUB_TOKEN in .env.');});
 }else showLogin();
 </script></body></html>"""
@@ -986,3 +1032,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
