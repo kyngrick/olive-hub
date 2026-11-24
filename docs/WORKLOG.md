@@ -31,6 +31,24 @@ restart everything.
 
 ---
 
+## 2026-11-24 10:40 — alarm/reminder bugs fixed
+
+- User reported alarms still failing. Reproduced: intent matched but handler
+  returned "Sorry, that didn't work."
+- Root cause: timezone patch left a naive `dt.datetime.now()` in `h_alarm_set`,
+  causing `TypeError: can't subtract offset-naive and offset-aware datetimes`
+  (same bug in the pending-alarm branch). Fixed all remaining naive `now()`
+  calls, including time/date/briefing and reminder duration path.
+- Fixed reminder text extraction: `set a reminder for 10 minutes to check the
+  oven` previously asked "What should I remind you about?"; now yields
+  "check the oven". Also handles "tomorrow at 9 am to call mum", Italian
+  `ricordami … domani alle 9` (added `alle/al` to clock parsing), and recurrence.
+- Fixed `timer.cancel` not matching plural "timers".
+- Verified live: all alarm phrasings, reminder phrasings (EN/IT), timers, time
+  and date work. All test alarms/reminders/timers cancelled afterwards.
+
+---
+
 ## 2026-11-24 03:00 — OTA outcome: 0.14.6 rejected by device, 0.14.5 restored
 
 - With user approval, backed up speaker config and attempted 0.14.6 OTA.

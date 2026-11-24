@@ -1907,7 +1907,7 @@ def _parse_recurrence(text: str) -> tuple[str, int, int, str]:
             hour, minute = 8, 0
     cleaned = re.sub(r"\bevery\s+(?:morning|evening|night|day|weekday|weekend|week)\b",
                      " ", text, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\b(?:at|around|by)\s+\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)?\b",
+    cleaned = re.sub(r"\b(?:at|around|by|alle|al)\s+\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)?\b",
                      " ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.;")
     return repeat, hour, minute, cleaned
@@ -2234,7 +2234,7 @@ def is_noise_transcript(text: str) -> bool:
 
 
 async def h_time(text: str, match, ctx: Context) -> Reply:
-    now = dt.datetime.now()
+    now = dt.datetime.now(LOCAL_TZ)
     if _looks_italian(text):
         return Reply(f"Sono le {now.strftime('%H:%M')}.", intent="time")
     return Reply(f"It's {now.strftime('%H:%M')}.", intent="time")
@@ -2254,7 +2254,7 @@ _ITALIAN_MONTHS = {
 
 
 async def h_date(text: str, match, ctx: Context) -> Reply:
-    today = dt.datetime.now()
+    today = dt.datetime.now(LOCAL_TZ)
     if _looks_italian(text):
         day = _ITALIAN_DAYS.get(today.strftime("%A"), today.strftime("%A"))
         month = _ITALIAN_MONTHS.get(today.strftime("%B"), today.strftime("%B"))
@@ -3001,7 +3001,7 @@ def parse_clock_target(text: str, allow_bare: bool = False) -> Optional[dt.datet
     """
     cleaned = normalise(text).replace("a.m.", "am").replace("p.m.", "pm")
     hit = re.search(
-        r"(?P<prefix>\b(?:at|around|by|for)\s+)?(?P<hour>\d{1,2})"
+        r"(?P<prefix>\b(?:at|around|by|for|alle|al)\s+)?(?P<hour>\d{1,2})"
         r"(?:[:.](?P<minute>\d{2}))?\s*(?P<ampm>am|pm)?\b",
         cleaned,
     )
@@ -3068,7 +3068,7 @@ def parse_event_when(text: str) -> tuple[Optional[dt.datetime], int]:
     """Resolve 'tomorrow at 9' / 'in 20 minutes' for calendar events."""
     seconds = parse_duration(text)
     if seconds:
-        return dt.datetime.now() + dt.timedelta(seconds=seconds), seconds
+        return dt.datetime.now(LOCAL_TZ) + dt.timedelta(seconds=seconds), seconds
     target = parse_clock_target(text)
     if target is None:
         return None, 0
@@ -3087,7 +3087,7 @@ async def h_alarm_set(text: str, match, ctx: Context) -> Reply:
     if target is None:
         ctx.pending = {"kind": "alarm", "expires": time.monotonic() + ctx.settings.pending_ttl}
         return Reply("Alarm for what time?", intent="alarm.set")
-    wait = int((target - dt.datetime.now()).total_seconds())
+    wait = int((target - dt.datetime.now(LOCAL_TZ)).total_seconds())
     if wait <= 0:
         wait += 86400
     label = f"alarm {target:%Y-%m-%d %H:%M}"
@@ -3098,31 +3098,54 @@ async def h_alarm_set(text: str, match, ctx: Context) -> Reply:
     return Reply(f"Alarm set for {pretty}.", intent="alarm.set")
 
 
+def _reminder_what(text: str) -> str:
+    """Extract the task text from a reminder request, dropping time words."""
+    cleaned = str(text or "")
+    cleaned = re.sub(r"^(?:alexa[,\s]+)?(?:please\s+)?", "", cleaned,
+                     flags=re.IGNORECASE)
+    # Command prefixes (English + Italian).
+    cleaned = re.sub(
+        r"^\s*(?:remind me|ricordami|set|create|add|make|remember)\b"
+        r"(?:\s+(?:an|a|my|the|up|me))?\s*"
+        r"(?:reminder|promemoria)?\s*",
+        "", cleaned, flags=re.IGNORECASE)
+    # Time expressions.
+    cleaned = re.sub(r"\bevery\s+(?:morning|evening|night|day|weekday|weekend|week)\b",
+                     " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(?:in|for|after)\s+\d+\s*"
+                     r"(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?)\b",
+                     " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(?:at|around|by|alle|al)\s+\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)?\b",
+                     " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(?:tomorrow|today|tonight|domani|oggi|stasera)\b",
+                     " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bnext\s+(?:monday|tuesday|wednesday|thursday|friday|"
+                     r"saturday|sunday)\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bon\s+\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?[a-z]+\b",
+                     " ", cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.strip()
+    cleaned = re.sub(r"\b(?:in|at|on|by|for|around|about|to|that|about)\s*$",
+                     "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"^(?:to|that|about|di|che)\s+", "", cleaned,
+                     flags=re.IGNORECASE).strip()
+    return re.sub(r"\s+", " ", cleaned).strip(" ,.;:")
+
+
 async def h_reminder_set(text: str, match, ctx: Context) -> Reply:
-    hit = re.search(r"\bremind me\s+(?:to|that|about)?\s*(.+)", text, re.IGNORECASE)
-    if not hit:
-        hit = re.search(r"\bricordami\s+(?:di|che)?\s*(.+)", text, re.IGNORECASE)
-    what = (hit.group(1) if hit else "").strip(" ,.")
-    repeat, rep_hour, rep_min, what = _parse_recurrence(what)
+    what = _reminder_what(text)
+    repeat, rep_hour, rep_min, cleaned = _parse_recurrence(what)
+    what = cleaned or what
     if repeat:
         text = f"at {rep_hour:02d}:{rep_min:02d}"
 
     seconds = parse_duration(text)
     target: Optional[dt.datetime] = None
     if seconds:
-        target = dt.datetime.now() + dt.timedelta(seconds=seconds)
-        what = DURATION_RE.sub(" ", what).strip(" ,.")
+        target = dt.datetime.now(LOCAL_TZ) + dt.timedelta(seconds=seconds)
     else:
         target = parse_when(text)
-        if target is not None:
-            what = re.sub(
-                r"\b(?:at|for|around|by)\s+\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)?\b",
-                " ", what, flags=re.IGNORECASE,
-            ).strip(" ,.")
-
-    what = re.sub(r"\b(?:in|at|on|by|for|around|about)\s*$", "", what,
-                  flags=re.IGNORECASE).strip(" ,.;")
-    what = re.sub(r"^(?:to|that|about)\s+", "", what, flags=re.IGNORECASE).strip(" ,.;")
+    if not what:
+        return Reply("What should I remind you about?", intent="reminder.set")
     if not what:
         return Reply("What should I remind you about?", intent="reminder.set")
     if target is None:
@@ -3517,7 +3540,7 @@ async def h_youtube(text: str, match, ctx: Context) -> Reply:
 
 
 async def h_briefing(text: str, match, ctx: Context) -> Reply:
-    now = dt.datetime.now()
+    now = dt.datetime.now(LOCAL_TZ)
     greeting = "Good morning" if now.hour < 12 else "Good afternoon" if now.hour < 18 else "Good evening"
     parts = [f"{greeting}. It's {now:%H:%M}."]
     try:
@@ -4356,7 +4379,7 @@ INTENTS: list[Intent] = [
         h_reminder_set,
         ["remind me in 10 minutes to check the oven"],
     ),
-    Intent("timer.cancel", compile_all(r"\b(cancel|stop|annulla|ferma)\b.*\btimer\b"), h_timer_cancel),
+    Intent("timer.cancel", compile_all(r"\b(cancel|stop|annulla|ferma)\b.*\btimers?\b"), h_timer_cancel),
     Intent("timer.list", compile_all(r"\b(list|what|which|quali|elenca)\b.*\btimers?\b"), h_timer_list),
     Intent(
         "timer.set",
@@ -5079,7 +5102,7 @@ class Router:
                 target = target.replace(tzinfo=LOCAL_TZ)
             if target is None:
                 return None
-            wait = int((target - dt.datetime.now()).total_seconds())
+            wait = int((target - dt.datetime.now(LOCAL_TZ)).total_seconds())
             if wait <= 0:
                 wait += 86400
             label = f"alarm {target:%Y-%m-%d %H:%M}"
