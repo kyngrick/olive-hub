@@ -43,6 +43,12 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
+try:
+    from zoneinfo import ZoneInfo
+    LOCAL_TZ = ZoneInfo(os.getenv("OLIVE_TIMEZONE", "Europe/Rome"))
+except Exception:
+    LOCAL_TZ = dt.datetime.now().astimezone().tzinfo
+
 import aiohttp
 from aiohttp import web
 
@@ -1870,6 +1876,59 @@ class ScheduleItem:
     announce: str
     action: str = ""   # "on" | "off" for scheduled device routines
     target: str = ""   # spoken device name, e.g. "kitchen light"
+    repeat: str = ""  # daily | weekdays | weekends | weekly
+    repeat_hour: int = 0
+    repeat_minute: int = 0
+
+
+def _parse_recurrence(text: str) -> tuple[str, int, int, str]:
+    """Return (repeat, hour, minute, text_without_recurrence_words)."""
+    low = normalise(text)
+    m = re.search(r"\bevery\s+(morning|evening|night|day|weekday|weekend|week)\b", low)
+    if not m:
+        return "", 0, 0, text
+    word = m.group(1)
+    repeat = {"morning": "daily", "day": "daily",
+              "week": "weekly", "weekday": "weekdays",
+              "weekend": "weekends", "evening": "daily",
+              "night": "daily"}[word]
+    hour, minute = 8, 0
+    if word in ("evening", "night"):
+        hour = 20
+    clock = re.search(r"\b(?:at\s+)?(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\b", low)
+    if clock:
+        hour, minute = int(clock.group(1)), int(clock.group(2) or 0)
+        amp = clock.group(3)
+        if amp == "pm" and hour < 12:
+            hour += 12
+        elif amp == "am" and hour == 12:
+            hour = 0
+        if hour > 23 or minute > 59:
+            hour, minute = 8, 0
+    cleaned = re.sub(r"\bevery\s+(?:morning|evening|night|day|weekday|weekend|week)\b",
+                     " ", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(?:at|around|by)\s+\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)?\b",
+                     " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.;")
+    return repeat, hour, minute, cleaned
+
+
+def _next_repeat(item: "ScheduleItem", now: dt.datetime) -> Optional[float]:
+    """Next occurrence timestamp for a recurring reminder/alarm."""
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=LOCAL_TZ)
+    candidate = now.replace(hour=item.repeat_hour, minute=item.repeat_minute,
+                            second=0, microsecond=0)
+    for _ in range(370):
+        day = candidate.weekday()
+        ok = (item.repeat == "daily" or
+              (item.repeat == "weekly" and day == 0) or
+              (item.repeat == "weekdays" and day < 5) or
+              (item.repeat == "weekends" and day >= 5))
+        if ok and candidate > now:
+            return candidate.timestamp()
+        candidate += dt.timedelta(days=1)
+    return None
 
 
 class Scheduler:
@@ -1898,7 +1957,10 @@ class Scheduler:
             try:
                 item = ScheduleItem(str(row["id"]), str(row["kind"]), float(row["due_at"]),
                                     str(row.get("label", "")), str(row.get("announce", "")),
-                                    str(row.get("action", "")), str(row.get("target", "")))
+                                    str(row.get("action", "")), str(row.get("target", "")),
+                                    str(row.get("repeat", "")),
+                                    int(row.get("repeat_hour", 0) or 0),
+                                    int(row.get("repeat_minute", 0) or 0))
             except (KeyError, TypeError, ValueError):
                 continue
             self.items[item.id] = item
@@ -1930,6 +1992,11 @@ class Scheduler:
                 now = time.time()
                 for item in [i for i in self.items.values() if i.due_at <= now]:
                     self.items.pop(item.id, None)
+                    if item.repeat and item.kind in ("reminder", "alarm"):
+                        next_due = _next_repeat(item, dt.datetime.now(LOCAL_TZ))
+                        if next_due is not None:
+                            item.due_at = next_due.timestamp()
+                            self.items[item.id] = item
                     self._save()
                     log.info("scheduler firing %s %r", item.kind, item.announce)
                     if item.announce:
@@ -1962,9 +2029,10 @@ class Scheduler:
             self._task = None
 
     async def add(self, kind: str, due_at: float, label: str, announce: str,
-                  action: str = "", target: str = "") -> ScheduleItem:
+                  action: str = "", target: str = "", repeat: str = "",
+                  repeat_hour: int = 0, repeat_minute: int = 0) -> ScheduleItem:
         item = ScheduleItem(uuid.uuid4().hex[:8], kind, due_at, label, announce,
-                            action, target)
+                            action, target, repeat, repeat_hour, repeat_minute)
         self.items[item.id] = item
         self._save()
         return item
@@ -2956,7 +3024,7 @@ def parse_clock_target(text: str, allow_bare: bool = False) -> Optional[dt.datet
         hour = 0
     if hour > 23:
         return None
-    now = dt.datetime.now()
+    now = dt.datetime.now(LOCAL_TZ)
     target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if target <= now:
         target += dt.timedelta(days=1)
@@ -2972,7 +3040,7 @@ def parse_when(text: str, allow_bare: bool = False) -> Optional[dt.datetime]:
     """
     seconds = parse_duration(text)
     if seconds:
-        return dt.datetime.now() + dt.timedelta(seconds=seconds)
+        return dt.datetime.now(LOCAL_TZ) + dt.timedelta(seconds=seconds)
     target = parse_clock_target(text, allow_bare=allow_bare)
     if target is None:
         return None
@@ -2980,12 +3048,12 @@ def parse_when(text: str, allow_bare: bool = False) -> Optional[dt.datetime]:
     night = bool(re.search(r"\b(?:night|evening|tonight|stasera|notte|sera)\b", low))
     morning = bool(re.search(r"\b(?:morning|mattina|am)\b", low))
     if re.search(r"\b(?:tonight|stasera|this evening)\b", low):
-        target = dt.datetime.combine(dt.date.today(), target.time())
+        target = dt.datetime.combine(dt.date.today(), target.time(), LOCAL_TZ)
         if night and not morning and target.hour < 12:
             target = target.replace(hour=target.hour + 12)
     elif re.search(r"\b(?:tomorrow|domani)\b", low):
         target = dt.datetime.combine(dt.date.today() + dt.timedelta(days=1),
-                                     target.time())
+                                     target.time(), LOCAL_TZ)
         if night and not morning and target.hour < 12:
             target = target.replace(hour=target.hour + 12)
     else:
@@ -3008,12 +3076,14 @@ def parse_event_when(text: str) -> tuple[Optional[dt.datetime], int]:
         # parse_clock_target already rolls a past time forward a day; setting
         # the date explicitly avoids rolling twice.
         target = dt.datetime.combine(dt.date.today() + dt.timedelta(days=1),
-                                     target.time())
+                                     target.time(), LOCAL_TZ)
     return target, 0
 
 
 async def h_alarm_set(text: str, match, ctx: Context) -> Reply:
     target = parse_when(text, allow_bare=True)
+    if target is not None and target.tzinfo is None:
+        target = target.replace(tzinfo=LOCAL_TZ)
     if target is None:
         ctx.pending = {"kind": "alarm", "expires": time.monotonic() + ctx.settings.pending_ttl}
         return Reply("Alarm for what time?", intent="alarm.set")
@@ -3033,6 +3103,9 @@ async def h_reminder_set(text: str, match, ctx: Context) -> Reply:
     if not hit:
         hit = re.search(r"\bricordami\s+(?:di|che)?\s*(.+)", text, re.IGNORECASE)
     what = (hit.group(1) if hit else "").strip(" ,.")
+    repeat, rep_hour, rep_min, what = _parse_recurrence(what)
+    if repeat:
+        text = f"at {rep_hour:02d}:{rep_min:02d}"
 
     seconds = parse_duration(text)
     target: Optional[dt.datetime] = None
@@ -3057,10 +3130,14 @@ async def h_reminder_set(text: str, match, ctx: Context) -> Reply:
                        "expires": time.monotonic() + ctx.settings.pending_ttl}
         return Reply("When should I remind you?", intent="reminder.set")
 
+    if target.tzinfo is None:
+        target = target.replace(tzinfo=LOCAL_TZ)
     await ctx.scheduler.add("reminder", target.timestamp(), f"reminder {what[:40]}",
-                            f"Reminder: {what}.")
+                            f"Reminder: {what}.", repeat=repeat,
+                            repeat_hour=rep_hour, repeat_minute=rep_min)
     when = target.strftime("%H:%M") if target.date() == dt.date.today() else target.strftime("%A %H:%M")
-    return Reply(f"Reminder set for {when}: {what}.", intent="reminder.set")
+    suffix = f" ({repeat})" if repeat else ""
+    return Reply(f"Reminder set for {when}{suffix}: {what}.", intent="reminder.set")
 
 
 async def h_routine_sunset(text: str, match, ctx: Context) -> Reply:
@@ -3894,6 +3971,317 @@ async def h_help(text: str, match, ctx: Context) -> Reply:
     )
 
 
+
+# =====================================================================
+# PHASE-1 INTENT HANDLERS (functional only; no placeholder registrations)
+# =====================================================================
+_MUTED_VOLUME: Optional[int] = None
+
+
+def _spoken_arg(text: str) -> str:
+    """Strip the leading command verb(s) from a spoken phrase."""
+    return re.sub(
+        r"^(?:alexa[,\s]+)?(?:please\s+)?(?:i\s+(?:want|would like)\s+to\s+)?"
+        r"(?:announce|say|note|remember|write down|set|make|check|show|read|list|"
+        r"turn|switch|mute|unmute|duck|lower|raise|increase|decrease)\s+",
+        "", str(text or "").strip(), flags=re.IGNORECASE).strip(" ,.?")
+
+
+async def h_wakeword_status(text: str, match, ctx: Context) -> Reply:
+    try:
+        d = (await ctx.device.call("GET", "/wake-word", timeout=8)).get("data") or {}
+    except Exception as exc:
+        return Reply(f"I couldn't read the wake word status: {exc}", intent="wakeword.status")
+    sens = d.get("sensitivity")
+    threshold = round(0.85 - 0.0044 * float(sens), 3) if sens is not None else None
+    bits = [f"wake word {d.get('wake_word', 'unknown')}",
+            f"model {d.get('model_status', 'unknown')}"]
+    if sens is not None:
+        bits.append(f"sensitivity {sens} (threshold {threshold})")
+    bits.append("ready" if d.get("capture_active") and d.get("inference_active") else "not ready")
+    return Reply("; ".join(bits) + ".", intent="wakeword.status")
+
+
+async def h_wakeword_sensitivity(text: str, match, ctx: Context) -> Reply:
+    return await h_wakeword_status(text, match, ctx)
+
+
+async def h_wakeword_set(text: str, match, ctx: Context) -> Reply:
+    hit = re.search(r"\d{1,3}", text)
+    if not hit:
+        return Reply("Tell me a sensitivity from 0 to 100.", intent="wakeword.set")
+    value = max(0, min(100, int(hit.group(0))))
+    try:
+        await ctx.device.call("PUT", "/wake-word", {"sensitivity": value},
+                              confirm=True, timeout=8)
+    except Exception as exc:
+        return Reply(f"I couldn't set wake sensitivity: {exc}", intent="wakeword.set")
+    return Reply(f"Wake sensitivity set to {value}.", intent="wakeword.set")
+
+
+async def h_wakeword_list(text: str, match, ctx: Context) -> Reply:
+    base = await h_wakeword_status(text, match, ctx)
+    try:
+        data = await ctx.device.call("GET", "/wake-word/models", timeout=6)
+        models = (data.get("data") or {}).get("models") or []
+        names = ", ".join(str(m.get("name")) for m in models) or "none staged"
+        return Reply(base.text + f" Available models: {names}.", intent="wakeword.list")
+    except Exception:
+        return Reply(base.text + " Custom model management requires LibreEcho 0.14.6 or newer.",
+                     intent="wakeword.list")
+
+
+async def h_wakeword_test(text: str, match, ctx: Context) -> Reply:
+    try:
+        await ctx.device.call("POST", "/wake-word/test", {}, timeout=8)
+    except Exception as exc:
+        return Reply(f"The wake word test failed: {exc}", intent="wakeword.test")
+    return Reply("That was a synthetic wake test; real speech was not evaluated.",
+                 intent="wakeword.test")
+
+
+async def h_microphone_status(text: str, match, ctx: Context) -> Reply:
+    try:
+        audio = (await ctx.device.call("GET", "/audio", timeout=8)).get("data") or {}
+        beams = (await ctx.device.call("GET", "/microphones/beams", timeout=8)).get("data") or {}
+    except Exception as exc:
+        return Reply(f"I couldn't read the microphone status: {exc}", intent="microphone.status")
+    return Reply(
+        f"Microphone gain {audio.get('microphone_gain', '?')}, "
+        f"{'muted' if audio.get('microphone_muted') else 'unmuted'}. "
+        f"Capture running: {beams.get('running', False)}; "
+        f"selected beam {beams.get('selected_deg', '?')} degrees, "
+        f"dominant direction {beams.get('doa_deg', '?')} degrees.",
+        intent="microphone.status")
+
+
+async def h_microphone_test(text: str, match, ctx: Context) -> Reply:
+    try:
+        first = (await ctx.device.call("GET", "/microphones/beams", timeout=8)).get("data") or {}
+        await asyncio.sleep(1.5)
+        second = (await ctx.device.call("GET", "/microphones/beams", timeout=8)).get("data") or {}
+    except Exception as exc:
+        return Reply(f"The microphone check failed: {exc}", intent="microphone.test")
+    return Reply(
+        f"Microphone capture is {'active' if second.get('running') else 'inactive'}. "
+        f"Peak level {second.get('peak_db', first.get('peak_db', '?'))} dBFS, "
+        f"direction {second.get('doa_deg', '?')} degrees, "
+        f"contrast {second.get('contrast_db', '?')} dB, "
+        f"beam switches {int(second.get('switches', 0)) - int(first.get('switches', 0))}.",
+        intent="microphone.test")
+
+
+async def h_audio_diagnostics(text: str, match, ctx: Context) -> Reply:
+    try:
+        dev = (await ctx.device.call("GET", "/device", timeout=8)).get("data") or {}
+        audio = (await ctx.device.call("GET", "/audio", timeout=8)).get("data") or {}
+        wake = (await ctx.device.call("GET", "/wake-word", timeout=8)).get("data") or {}
+        beams = (await ctx.device.call("GET", "/microphones/beams", timeout=8)).get("data") or {}
+    except Exception as exc:
+        return Reply(f"Audio diagnostics failed: {exc}", intent="audio.diagnostics")
+    cap = ((dev.get("audio") or {}).get("capture") or {})
+    return Reply(
+        f"Audio diagnostics: {cap.get('microphones', '?')} microphones at "
+        f"{cap.get('rate_hz', '?')} Hz, {cap.get('digital_gain', '?')} digital gain, "
+        f"noise floor {cap.get('noise_floor_dbfs', '?')} dBFS. "
+        f"Speaker volume {audio.get('volume', '?')}, mic gain {audio.get('microphone_gain', '?')}. "
+        f"Wake sensitivity {wake.get('sensitivity', '?')}, "
+        f"beam {beams.get('selected_deg', '?')} vs direction {beams.get('doa_deg', '?')}, "
+        f"peak {beams.get('peak_db', '?')} dBFS.",
+        intent="audio.diagnostics")
+
+
+async def h_music_duck(text: str, match, ctx: Context) -> Reply:
+    current = await ctx.device.current_volume()
+    if current is None:
+        return Reply("I couldn't read the speaker volume.", intent="music.duck")
+    target = max(5, int(current * 0.35))
+    try:
+        await ctx.device.set_volume(target)
+    except Exception as exc:
+        return Reply(f"I couldn't lower the music: {exc}", intent="music.duck")
+
+    async def restore() -> None:
+        await asyncio.sleep(30)
+        try:
+            await ctx.device.set_volume(current)
+        except Exception as exc:
+            log.debug("music duck restore failed: %s", exc)
+
+    background(restore())
+    return Reply(f"Music lowered from {current} to {target} for 30 seconds.", intent="music.duck")
+
+
+async def h_volume_mute(text: str, match, ctx: Context) -> Reply:
+    global _MUTED_VOLUME
+    current = await ctx.device.current_volume()
+    if current is None:
+        return Reply("I couldn't read the speaker volume.", intent="volume.mute")
+    _MUTED_VOLUME = current
+    try:
+        await ctx.device.set_volume(0)
+    except Exception as exc:
+        return Reply(f"I couldn't mute the speaker: {exc}", intent="volume.mute")
+    return Reply("Speaker muted.", intent="volume.mute")
+
+
+async def h_volume_unmute(text: str, match, ctx: Context) -> Reply:
+    global _MUTED_VOLUME
+    level = _MUTED_VOLUME if _MUTED_VOLUME is not None else 30
+    try:
+        await ctx.device.set_volume(level)
+    except Exception as exc:
+        return Reply(f"I couldn't unmute the speaker: {exc}", intent="volume.unmute")
+    _MUTED_VOLUME = None
+    return Reply(f"Speaker unmuted to {level}.", intent="volume.unmute")
+
+
+async def h_volume_relative(text: str, match, ctx: Context) -> Reply:
+    current = await ctx.device.current_volume()
+    if current is None:
+        return Reply("I couldn't read the speaker volume.", intent="volume.relative")
+    hit = re.search(r"\d{1,3}", text)
+    step = int(hit.group(0)) if hit else 10
+    direction = -1 if re.search(r"\b(down|lower|decrease|less|giù|abbassa)\b", text, re.I) else 1
+    target = max(0, min(100, current + step * direction))
+    try:
+        await ctx.device.set_volume(target)
+    except Exception as exc:
+        return Reply(f"I couldn't change the volume: {exc}", intent="volume.relative")
+    return Reply(f"Volume {target}.", intent="volume.relative")
+
+
+async def h_announce(text: str, match, ctx: Context) -> Reply:
+    message = _spoken_arg(text)
+    if not message:
+        return Reply("What should I announce?", intent="announce")
+    try:
+        await ctx.device.announce(message)
+    except Exception as exc:
+        return Reply(f"I couldn't make that announcement: {exc}", intent="announce")
+    return Reply(f"Announced: {message}", intent="announce")
+
+
+async def h_note_add(text: str, match, ctx: Context) -> Reply:
+    note = _spoken_arg(text)
+    if not note:
+        return Reply("What should I note?", intent="note.add")
+    if not ctx.memory:
+        return Reply("Note storage isn't available.", intent="note.add")
+    reply = ctx.memory.add_note(note)
+    return Reply(reply or f"Noted: {note}", intent="note.add")
+
+
+async def h_note_list(text: str, match, ctx: Context) -> Reply:
+    notes = list((getattr(ctx.memory, "notes", None) or []))[-5:]
+    if not notes:
+        return Reply("You have no notes.", intent="note.list")
+    text_notes = [str(n.get("text") or "") for n in notes if isinstance(n, dict)]
+    return Reply("Notes: " + "; ".join(text_notes) + ".", intent="note.list")
+
+
+async def h_note_read(text: str, match, ctx: Context) -> Reply:
+    notes = list((getattr(ctx.memory, "notes", None) or []))
+    if not notes:
+        return Reply("You have no notes.", intent="note.read")
+    hit = re.search(r"\d{1,2}", text)
+    idx = int(hit.group(0)) if hit else len(notes)
+    idx = max(1, min(len(notes), idx))
+    note = notes[idx - 1]
+    return Reply(f"Note {idx}: {note.get('text', '')}.", intent="note.read")
+
+
+async def h_alarm_snooze(text: str, match, ctx: Context) -> Reply:
+    alarms = ctx.scheduler.list("alarm")
+    if not alarms:
+        return Reply("There is no alarm to snooze.", intent="alarm.snooze")
+    item = alarms[0]
+    ctx.scheduler.items.pop(item.id, None)
+    new_due = item.due_at + 9 * 60
+    await ctx.scheduler.add("alarm", new_due, item.label, item.announce,
+                            item.action, item.target, item.repeat,
+                            item.repeat_hour, item.repeat_minute)
+    when = dt.datetime.fromtimestamp(new_due, LOCAL_TZ).strftime("%H:%M")
+    return Reply(f"Alarm snoozed until {when}.", intent="alarm.snooze")
+
+
+async def h_system_status(text: str, match, ctx: Context) -> Reply:
+    alarms = len(ctx.scheduler.list("alarm"))
+    reminders = len(ctx.scheduler.list("reminder"))
+    return Reply(
+        f"Olive is online. {len(oh_intents_for_status())} intents registered, "
+        f"{reminders} reminders and {alarms} alarms scheduled. "
+        f"Assistant model {ctx.settings.llm_model}.",
+        intent="system.status")
+
+
+def oh_intents_for_status() -> list:
+    return INTENTS
+
+
+async def h_system_diagnostics(text: str, match, ctx: Context) -> Reply:
+    try:
+        status = await ctx.device.call("GET", "/status", timeout=8)
+        data = status.get("data") or {}
+    except Exception as exc:
+        return Reply(f"Diagnostics failed: {exc}", intent="system.diagnostics")
+    return Reply(
+        f"Speaker online for {int(data.get('uptime_seconds', 0)) // 60} minutes, "
+        f"CPU {data.get('cpu_percent', '?')} percent, memory "
+        f"{data.get('memory_percent', '?')} percent, "
+        f"features {data.get('features_state', '?')}. "
+        f"Hub has {len(INTENTS)} intents, {len(ctx.scheduler.items)} scheduled items.",
+        intent="system.diagnostics")
+
+
+async def h_light_toggle(text: str, match, ctx: Context) -> Reply:
+    target = _spoken_arg(text) or "light"
+    target = re.sub(r"\b(?:light|lights|lamp|lamps)\b", "", target,
+                    flags=re.IGNORECASE).strip() or "light"
+    on = bool(re.search(r"\b(on|accendi|attiva)\b", text, re.IGNORECASE))
+    if re.search(r"\b(off|spegni|disattiva)\b", text, re.IGNORECASE):
+        on = False
+    return await home_toggle(ctx, target, on)
+
+
+async def h_plug_on(text: str, match, ctx: Context) -> Reply:
+    target = _spoken_arg(text) or "plug"
+    return await home_toggle(ctx, target, True)
+
+
+async def h_plug_off(text: str, match, ctx: Context) -> Reply:
+    target = _spoken_arg(text) or "plug"
+    return await home_toggle(ctx, target, False)
+
+
+async def h_routine_goodnight(text: str, match, ctx: Context) -> Reply:
+    changed = 0
+    for device in (ctx.iot.ready if ctx.iot and ctx.iot.enabled else []):
+        try:
+            if await ctx.iot.set_power(device, False):
+                changed += 1
+        except Exception as exc:
+            log.debug("goodnight power off failed: %s", exc)
+    try:
+        await ctx.device.set_volume(10)
+    except Exception:
+        pass
+    return Reply(f"Goodnight. Turned off {changed} local device(s) and lowered the volume.",
+                 intent="routine.goodnight")
+
+
+async def h_routine_goodmorning(text: str, match, ctx: Context) -> Reply:
+    changed = 0
+    for device in (ctx.iot.ready if ctx.iot and ctx.iot.enabled else []):
+        try:
+            if await ctx.iot.set_power(device, True):
+                changed += 1
+        except Exception as exc:
+            log.debug("goodmorning power on failed: %s", exc)
+    return Reply(f"Good morning. Turned on {changed} local device(s). " +
+                 (await h_briefing(text, match, ctx)).text, intent="routine.goodmorning")
+
+
 INTENTS: list[Intent] = [
     Intent("help", compile_all(r"\b(help|what can you do|cosa sai fare|aiuto)\b"), h_help),
     Intent("iot.scan", compile_all(
@@ -3961,8 +4349,12 @@ INTENTS: list[Intent] = [
         compile_all(
             r"\bremind me\b(?P<what>.*)$",
             r"\bricordami\b(?P<what>.*)$",
+            r"\b(?:set|create|add|make)\b\s+(?:a\s+|an\s+|my\s+)?reminders?\b(?P<what>.*)$",
+            r"\b(?:set|create|add|make)\b\s+(?:a\s+|an\s+|my\s+)?promemoria\b(?P<what>.*)$",
+            r"\bremember to\b(?P<what>.*)$",
         ),
         h_reminder_set,
+        ["remind me in 10 minutes to check the oven"],
     ),
     Intent("timer.cancel", compile_all(r"\b(cancel|stop|annulla|ferma)\b.*\btimer\b"), h_timer_cancel),
     Intent("timer.list", compile_all(r"\b(list|what|which|quali|elenca)\b.*\btimers?\b"), h_timer_list),
@@ -4155,6 +4547,103 @@ INTENTS: list[Intent] = [
         r"\btrain\s+(?:times?|tickets?|costs?|prices?|fares?|schedule)\b",
         r"\b(?:orari|treni|biglietti)\b.*\btren\b",
     ), h_trains),
+    Intent("wakeword.status", compile_all(
+        r"\b(?:wake[\s-]?word|wake word)\s+(?:status|state|health|is (?:ok|ready))\b",
+        r"\b(?:status|how is)\s+(?:the\s+)?wake[\s-]?word\b",
+    ), h_wakeword_status),
+    Intent("wakeword.set", compile_all(
+        r"\bset\s+wake[\s-]?word\s+sensitivity\s+to\s+\d{1,3}\b",
+        r"\bwake[\s-]?word\s+sensitivity\s+\d{1,3}\b",
+    ), h_wakeword_set),
+    Intent("wakeword.sensitivity", compile_all(
+        r"\bwake[\s-]?word\s+sensitivity\b",
+        r"\bhow\s+sensitive\s+is\s+(?:the\s+)?wake[\s-]?word\b",
+    ), h_wakeword_sensitivity),
+    Intent("wakeword.list", compile_all(
+        r"\blist\s+(?:available\s+)?wake[\s-]?word\s+models?\b",
+        r"\bwake[\s-]?word\s+models?\b",
+    ), h_wakeword_list),
+    Intent("wakeword.test", compile_all(
+        r"\b(?:test|run|check)\s+(?:the\s+)?wake[\s-]?word(?:\s+test)?\b",
+        r"\bwake[\s-]?word\s+test\b",
+    ), h_wakeword_test),
+    Intent("microphone.status", compile_all(
+        r"\b(?:microphone|mic)\s+(?:status|state|level|gain|is (?:on|off|muted))\b",
+        r"\bstatus\s+of\s+(?:the\s+)?(?:microphone|mic)\b",
+    ), h_microphone_status),
+    Intent("microphone.test", compile_all(
+        r"\b(?:test|check)\s+(?:the\s+)?(?:microphone|mic)\b",
+        r"\b(?:microphone|mic)\s+(?:test|check)\b",
+    ), h_microphone_test),
+    Intent("audio.diagnostics", compile_all(
+        r"\b(?:audio|sound)\s+diagnostics?\b",
+        r"\bdiagnose\s+(?:the\s+)?(?:audio|sound|microphone)\b",
+    ), h_audio_diagnostics),
+    Intent("music.duck", compile_all(
+        r"\b(?:duck|lower|reduce)\s+(?:the\s+)?music\b",
+        r"\bturn\s+down\s+(?:the\s+)?music\b",
+    ), h_music_duck),
+    Intent("volume.mute", compile_all(
+        r"\b(?:mute|silence)\s+(?:the\s+)?(?:speaker|volume|olive)\b",
+        r"\bmute\b",
+    ), h_volume_mute),
+    Intent("volume.unmute", compile_all(
+        r"\b(?:unmute|un-mute|restore)\s+(?:the\s+)?(?:speaker|volume|olive)\b",
+        r"\bunmute\b",
+    ), h_volume_unmute),
+    Intent("volume.relative", compile_all(
+        r"\b(?:volume|turn)\s+(?:up|down|higher|lower)\b",
+        r"\b(?:increase|decrease|raise|lower)\s+(?:the\s+)?volume\b",
+        r"\bvolume\s+(?:plus|minus)\b",
+    ), h_volume_relative),
+    Intent("announce", compile_all(
+        r"^\s*announce\s+.+$",
+        r"^\s*say\s+(?!the\s+time|the\s+date|hello|hi)\s*.+$",
+    ), h_announce),
+    Intent("note.add", compile_all(
+        r"^\s*(?:note|remember|write down)\s+(?:that\s+)?(.+)$",
+        r"\b(?:make|take|add)\s+a\s+note\b",
+    ), h_note_add),
+    Intent("note.list", compile_all(
+        r"\b(?:list|show|what are|read)\s+(?:my\s+)?notes?\b",
+        r"\bnotes\?\s*$",
+    ), h_note_list),
+    Intent("note.read", compile_all(
+        r"\bread\s+(?:note|the note)\b",
+        r"\b(?:note|notes)\s+\d{1,2}\b",
+    ), h_note_read),
+    Intent("alarm.snooze", compile_all(
+        r"\bsnooze\b",
+        r"\b(?:alarm|timer)\b.*\bsnooze\b",
+    ), h_alarm_snooze),
+    Intent("system.status", compile_all(
+        r"\b(?:system|olive)\s+status\b",
+        r"\bhow\s+is\s+(?:olive|the system)\b",
+    ), h_system_status),
+    Intent("system.diagnostics", compile_all(
+        r"\bsystem\s+diagnostics\b",
+        r"\brun\s+(?:system\s+)?diagnostics\b",
+    ), h_system_diagnostics),
+    Intent("light.toggle", compile_all(
+        r"\b(?:turn|switch)\s+(?:on|off)\s+(?:the\s+)?(?:light|lights|lamp|lamps)\b",
+        r"\b(?:accendi|spegni)\s+(?:la\s+|le\s+)?(?:luce|luci|lampada|lampade)\b",
+    ), h_light_toggle),
+    Intent("plug.on", compile_all(
+        r"\b(?:turn|switch)\s+on\s+(?:the\s+)?(?:plug|outlet|socket)\b",
+        r"\bplug\s+on\b",
+    ), h_plug_on),
+    Intent("plug.off", compile_all(
+        r"\b(?:turn|switch)\s+off\s+(?:the\s+)?(?:plug|outlet|socket)\b",
+        r"\bplug\s+off\b",
+    ), h_plug_off),
+    Intent("routine.goodnight", compile_all(
+        r"\bgood\s?night\b",
+        r"\b(?:run|start)\s+(?:the\s+)?goodnight\s+routine\b",
+    ), h_routine_goodnight),
+    Intent("routine.goodmorning", compile_all(
+        r"\bgood\s?morning\b",
+        r"\b(?:run|start)\s+(?:the\s+)?good\s?morning\s+routine\b",
+    ), h_routine_goodmorning),
     Intent(
         "calendar.add",
         compile_all(
@@ -4358,10 +4847,20 @@ def apply_intents_config(data: dict | None) -> tuple[list[str], list[str]]:
     if not isinstance(data, dict):
         return (["intents config must be an object"], [])
 
+    version = data.get("version", 1)
+    if not isinstance(version, int) or version < 1:
+        errors.append("version must be a positive integer")
     disabled_raw = data.get("disabled") or []
-    DISABLED_INTENTS = {str(x) for x in disabled_raw if isinstance(x, str)}
+    if not isinstance(disabled_raw, list):
+        return (["disabled must be a list"], [])
+    disabled = {str(x) for x in disabled_raw if isinstance(x, str)}
+    builtin_names = {i.name.lower() for i in INTENTS}
+    seen: set[str] = set()
+    intents_raw = data.get("intents") or []
+    if not isinstance(intents_raw, list):
+        return (["intents must be a list"], [])
 
-    for item in data.get("intents") or []:
+    for item in intents_raw:
         if not isinstance(item, dict):
             errors.append("skipped a non-object intent entry")
             continue
@@ -4370,6 +4869,18 @@ def apply_intents_config(data: dict | None) -> tuple[list[str], list[str]]:
             errors.append(f"invalid intent name: {name!r}")
             continue
         if not item.get("enabled", True):
+            continue
+        key = name.lower()
+        if key in seen:
+            errors.append(f"duplicate custom intent name: {name}")
+            continue
+        seen.add(key)
+        if key in builtin_names:
+            errors.append(f"intent {name} collides with a built-in intent")
+            continue
+        speak = str(item.get("speak") or "pipeline")
+        if speak not in ("pipeline", "device", "none"):
+            errors.append(f"intent {name}: invalid speak mode {speak!r}")
             continue
         patterns = [str(p) for p in (item.get("patterns") or []) if isinstance(p, str) and p.strip()]
         if not patterns:
@@ -4381,7 +4892,10 @@ def apply_intents_config(data: dict | None) -> tuple[list[str], list[str]]:
             errors.append(f"intent {name}: bad regex: {exc}")
             continue
         entries.append(Intent(name, compiled, _make_custom_handler(item)))
+    if errors:
+        return errors, []
     CUSTOM_INTENTS = entries
+    DISABLED_INTENTS = disabled
     return errors, [i.name for i in entries]
 
 
@@ -4391,7 +4905,7 @@ def reload_custom_intents() -> tuple[list[str], list[str]]:
         with open(CUSTOM_INTENTS_FILE, encoding="utf-8-sig") as handle:
             data = json.load(handle)
     except FileNotFoundError:
-        data = {"intents": [], "disabled": []}
+        return (["custom_intents.json is missing; keeping the current configuration"], [])
     except Exception as exc:
         return ([f"cannot read custom_intents.json: {exc}"], [])
     return apply_intents_config(data)
@@ -4561,6 +5075,8 @@ class Router:
             return Reply(f"Timer set for {pretty_duration(seconds)}.", intent="timer.set")
         if kind == "alarm":
             target = parse_when(text, allow_bare=True)
+            if target is not None and target.tzinfo is None:
+                target = target.replace(tzinfo=LOCAL_TZ)
             if target is None:
                 return None
             wait = int((target - dt.datetime.now()).total_seconds())
@@ -4572,6 +5088,8 @@ class Router:
             return Reply(f"Alarm set for {target:%H:%M}.", intent="alarm.set")
         if kind == "reminder":
             target = parse_when(text, allow_bare=True)
+            if target is not None and target.tzinfo is None:
+                target = target.replace(tzinfo=LOCAL_TZ)
             if target is None:
                 return None
             what = str(pending.get("what") or "something")
@@ -4955,10 +5473,9 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
                 ) as resp:
                     if resp.status != 200:
                         body = (await resp.text())[:200]
-                        log.error("LLM %s returned %s: %s", name, resp.status, body)
-                        if resp.status in (404, 400):
-                            continue
-                        return None
+                        log.error("LLM %s returned %s: %s; trying next model",
+                                  name, resp.status, body)
+                        continue
                     data = await resp.json(content_type=None)
                 answer = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
                 if not answer.strip():
@@ -4971,8 +5488,9 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
                          time.monotonic() - started, len(answer))
                 return answer.strip()
             except Exception as exc:
-                log.error("LLM request failed: %s", exc)
-                return None
+                log.error("LLM %s request failed: %s; trying next model", name, exc)
+                continue
+        log.error("All LLM models failed for this turn")
         return None
 
     router.llm_answer = llm_answer
@@ -5293,10 +5811,16 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
         # so it can be restored if the file write fails.
         global CUSTOM_INTENTS, DISABLED_INTENTS
         old_custom, old_disabled = CUSTOM_INTENTS, DISABLED_INTENTS
-        errors, names = apply_intents_config(data)
+        try:
+            errors, names = apply_intents_config(data)
+        except Exception as exc:
+            CUSTOM_INTENTS, DISABLED_INTENTS = old_custom, old_disabled
+            log.exception("intent validation failed")
+            return web.json_response({"ok": False, "error": f"validation failed: {exc}"}, status=400)
         if errors:
             CUSTOM_INTENTS, DISABLED_INTENTS = old_custom, old_disabled
             return web.json_response({"ok": False, "errors": errors}, status=400)
+        tmp = ""
         try:
             directory = os.path.dirname(CUSTOM_INTENTS_FILE) or "."
             fd, tmp = tempfile.mkstemp(prefix=".custom-intents-", suffix=".json", dir=directory)
@@ -5305,6 +5829,11 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
             os.replace(tmp, CUSTOM_INTENTS_FILE)
         except Exception as exc:
             CUSTOM_INTENTS, DISABLED_INTENTS = old_custom, old_disabled
+            if tmp and os.path.exists(tmp):
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
             log.exception("failed to save custom intents")
             return web.json_response({"ok": False, "error": str(exc)}, status=500)
         log.info("custom intents reloaded: %d active, %d built-ins disabled",
@@ -5313,8 +5842,28 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
                                   "disabled": sorted(DISABLED_INTENTS)})
 
     app.router.add_get("/health", health)
+    async def intents_reload(_request: web.Request) -> web.Response:
+        """Re-read custom_intents.json and apply atomically, with rollback."""
+        global CUSTOM_INTENTS, DISABLED_INTENTS
+        old_custom, old_disabled = CUSTOM_INTENTS, DISABLED_INTENTS
+        try:
+            errors, names = reload_custom_intents()
+        except Exception as exc:
+            CUSTOM_INTENTS, DISABLED_INTENTS = old_custom, old_disabled
+            log.exception("intentReload failed")
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        if errors:
+            CUSTOM_INTENTS, DISABLED_INTENTS = old_custom, old_disabled
+            return web.json_response({"ok": False, "errors": errors}, status=400)
+        log.info("intentReload: %d custom intents active, %d built-ins disabled",
+                 len(names), len(DISABLED_INTENTS))
+        return web.json_response({"ok": True, "active": names,
+                                  "disabled": sorted(DISABLED_INTENTS),
+                                  "builtins": len(INTENTS)})
+
     app.router.add_get("/intents", intents_get)
     app.router.add_post("/intents", intents_post)
+    app.router.add_post("/intents/reload", intents_reload)
     app.router.add_get("/v1/models", models)
     app.router.add_post("/command", command)
     app.router.add_post("/v1/chat/completions", chat)
@@ -5505,6 +6054,8 @@ async def run(settings: Optional[Settings] = None) -> None:
         places=places, shopping=shopping,
     )
     router = Router(ctx)
+    ctx.conversation = Conversation(ttl=settings.conversation_ttl,
+                                    max_turns=settings.conversation_turns)
 
     async def run_scheduled_action(item: "ScheduleItem") -> None:
         if not item.action:

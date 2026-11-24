@@ -31,6 +31,31 @@ restart everything.
 
 ---
 
+## 2026-11-24 01:50 — audit + authorised hub-side fixes
+
+- Delivered read-only diagnostic report `EXPANSION-AND-AUDIT-PLAN-2026-11-24.md`
+  (4 parallel audits: intents, voice/TTS, reminders/clock/AI, services).
+  Key findings: device still 0.14.5; AEC reset bug is leading cause of wake
+  trouble; 33+ Phase-1 intents and `intentReload` missing; LLM fallback skipped
+  network errors; reminders only matched "remind me"; no timezone in hub;
+  voice changes come from per-utterance language routing and persona registry.
+- With user approval, implemented hub fixes (backups made first): LLM fallback
+  on all failures; conversation settings applied; `Europe/Rome` timezone;
+  widened reminder patterns + real recurring reminders; `alarm.snooze`.
+- Added 24 functional Phase-1 intents (74 → 98), with no placeholder handlers;
+  skipped shuffle/repeat/search/favourite/broadcast/intercom/light.color/scene
+  because no real backend exists.
+- Implemented atomic `intentReload` (`POST /intents/reload`) with duplicate/
+  collision/speak/version validation and rollback on all failures; dashboard
+  Reload button now really reloads.
+- Created `UPGRADE-0.14.6-CHECKLIST.md` and gated read-only
+  `tools/wake/ab_wake_test.py`; baseline smoke test saved `wake-ab-results.json`.
+- Verified live: 98 intents, hub healthy, 9/9 services, new intents and reload
+  tested. No firmware/model/device-config changes made. Test side effects
+  restored.
+
+---
+
 ## 2026-11-23 19:00 — location + train lookup
 
 - Researched free train APIs. Chose **Transitous** (open MOTIS 2 API, no key,

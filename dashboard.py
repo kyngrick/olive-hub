@@ -339,6 +339,15 @@ async def api_intents_get(_request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": str(exc)}, status=502)
 
 
+async def api_intents_reload(_request: web.Request) -> web.Response:
+    """Re-read custom_intents.json on the hub (intentReload)."""
+    try:
+        status, body = await hub_call("POST", "/intents/reload", {}, timeout=10)
+        return web.json_response(body, status=status)
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=502)
+
+
 async def api_intents_set(request: web.Request) -> web.Response:
     try:
         data = await request.json()
@@ -563,6 +572,7 @@ def make_app() -> web.Application:
     app.router.add_get("/api/voice/job", api_voice_job)
     app.router.add_get("/api/intents", api_intents_get)
     app.router.add_post("/api/intents", api_intents_set)
+    app.router.add_post("/api/intents/reload", api_intents_reload)
     app.router.add_get("/api/speaker", api_speaker_get)
     app.router.add_post("/api/speaker", api_speaker_set)
     app.router.add_post("/api/latency", api_latency)
@@ -644,7 +654,7 @@ button{cursor:pointer}button:hover{border-color:var(--accent)}button.mini{paddin
 <input id="newiname" placeholder="name, e.g. custom.coffee" style="width:100%;margin-bottom:4px">
 <input id="newipatterns" placeholder="patterns, comma separated (regex)" style="width:100%;margin-bottom:4px">
 <input id="newireply" placeholder="spoken reply" style="width:100%;margin-bottom:4px">
-<div class="bar"><button class="mini" onclick="addCustomIntent()">Add intent</button><button class="mini" onclick="loadIntents()">Reload</button></div>
+<div class="bar"><button class="mini" onclick="addCustomIntent()">Add intent</button><button class="mini" onclick="reloadIntents()">Reload</button></div>
 <div id="intenterrmsg" class="err"></div></div>
 <div class="card" id="card-speaker"><h2>Wake word / microphone</h2>
 <div id="speakerinfo" class="dim">loading…</div>
@@ -830,6 +840,14 @@ async function pollVoiceJob(id,box){
 }
 // ---- intent editor ----
 let INTENT_DATA=null;
+async function reloadIntents(){
+  const box=document.getElementById('intenterrmsg');box.textContent='Reloading…';
+  try{
+    const r=await api('/api/intents/reload',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    box.textContent=r.ok?('Reloaded: '+r.active.length+' custom, '+r.builtins+' built-in.'):('Reload failed: '+JSON.stringify(r.errors||r.error));
+    if(r.ok){loadIntents();loadAll();}
+  }catch(e){box.textContent='Reload failed: '+e.message;}
+}
 async function loadIntents(){
   try{
     INTENT_DATA=await api('/api/intents');
