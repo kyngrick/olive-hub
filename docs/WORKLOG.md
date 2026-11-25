@@ -31,6 +31,23 @@ restart everything.
 
 ---
 
+## 2026-11-25 11:55 — live alarm/reminder/message tests
+
+- Added alarm patterns for duration-based phrases ("alarm in two minutes",
+  "set an alarm for two minutes from now") so they route to `alarm.set` and
+  never the timer pipeline.
+- Fixed reminder text extraction for word-number durations
+  ("in three minutes …").
+- Ran live evidence tests with real speaker: 2-minute alarm (alarm.set, delivered
+  at due time, voice logged), 3-minute reminder surviving a hub restart
+  (delivered at due time), local notification test (delivery confirmed).
+- WhatsApp bridge is not connected (`starting`, stale Chrome lock); no external
+  message was sent and no external recipient was used.
+- Explicit alarm cancellation verified (pending 1 → 0). No duplicate deliveries.
+- Evidence: `LIVE-TEST-EVIDENCE-2026-11-25.json`, `LIVE-TEST-REPORT-2026-11-25.md`.
+
+---
+
 ## 2026-11-24 17:45 — scheduler reliability repair (full pipeline)
 
 - Root cause of alarm→timer symptom: alarms were implemented on device timers

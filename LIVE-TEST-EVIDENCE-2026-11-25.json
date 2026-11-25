@@ -1,0 +1,77 @@
+{
+  "run_at": "2026-11-25T11:46:27.213891",
+  "tests": [
+    {
+      "test_id": "A-ALARM-2MIN",
+      "spoken_request": "Olive, set an alarm for two minutes from now",
+      "recognised_transcript": "set an alarm for two minutes from now",
+      "classified_intent": "alarm.set",
+      "selected_handler": "h_alarm_set -> scheduler(kind=alarm)",
+      "saved_record": {
+        "kind": "alarm",
+        "label": "alarm 2026-11-25 11:48",
+        "due": "2026-11-25T11:48:29.827700+01:00",
+        "status": "pending",
+        "trace": "4a36ccbe4efd"
+      },
+      "scheduled_execution_time": "2026-11-25T11:48:29.827700+01:00",
+      "actual_execution_time": "2026-11-25T11:48:30.592248+01:00",
+      "tts_response": "Good morning. It is 11:48. Your alarm is going off.",
+      "speaker_playback_result": "delivered=True, speaker=LibreEcho",
+      "notification_message_status": "local speaker notification",
+      "final_result": "PASS"
+    },
+    {
+      "test_id": "B-REMINDER-3MIN-RESTART",
+      "spoken_request": "Olive, remind me in three minutes to check the reminder system",
+      "recognised_transcript": "remind me in three minutes to check the reminder system",
+      "classified_intent": "reminder.set",
+      "selected_handler": "h_reminder_set -> scheduler(kind=reminder)",
+      "saved_record": {
+        "kind": "reminder",
+        "label": "reminder check the reminder system",
+        "due": "2026-11-25T11:51:37.452569+01:00",
+        "status": "pending",
+        "trace": "d619fdf6c832"
+      },
+      "scheduled_execution_time": "2026-11-25T11:51:37.452569+01:00",
+      "actual_execution_time": "2026-11-25T11:51:39.035534+01:00",
+      "tts_response": "Reminder: check the reminder system.",
+      "speaker_playback_result": "delivered=True, speaker=LibreEcho",
+      "notification_message_status": "local speaker notification",
+      "final_result": "PASS"
+    },
+    {
+      "test_id": "C-TEST-MESSAGE",
+      "spoken_request": "test the notifications",
+      "recognised_transcript": "test the notifications",
+      "classified_intent": "system.notifications.test",
+      "selected_handler": "h_notifications_test -> scheduler(system) -> speaker",
+      "saved_record": {
+        "at": "2026-11-25T11:51:51.285110+01:00",
+        "trace_id": "e13beb32411e",
+        "item_id": "eb0c0bb42afb",
+        "kind": "system",
+        "due_at": "2026-11-25T11:51:48.196305+01:00",
+        "label": "notification test",
+        "announce": "This is a notification test.",
+        "speaker": "LibreEcho",
+        "voice": "this is ricky",
+        "delivered": true,
+        "attempts": 1,
+        "error": ""
+      },
+      "scheduled_execution_time": null,
+      "actual_execution_time": "2026-11-25T11:51:51.285110+01:00",
+      "tts_response": "This is a notification test.",
+      "speaker_playback_result": "delivered=True",
+      "notification_message_status": "local speaker notification delivered; WhatsApp NOT connected (starting) - no external message sent, no external recipient authorised",
+      "final_result": "PASS (local channel)"
+    }
+  ],
+  "duplicate_traces": {},
+  "whatsapp_status": "starting",
+  "final_health": {
+    "intents": 111
+  }
+}

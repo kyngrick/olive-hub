@@ -3300,7 +3300,9 @@ def _reminder_what(text: str) -> str:
     # Time expressions.
     cleaned = re.sub(r"\bevery\s+(?:morning|evening|night|day|weekday|weekend|week)\b",
                      " ", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\b(?:in|for|after)\s+\d+\s*"
+    cleaned = re.sub(r"\b(?:in|for|after)\s+"
+                     r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|"
+                     r"eleven|twelve|thirteen|fourteen|fifteen|twenty|thirty|a|an)\s*"
                      r"(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?)\b",
                      " ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\b(?:at|around|by|alle|al)\s+\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)?\b",
@@ -4641,6 +4643,9 @@ INTENTS: list[Intent] = [
             r"\bwake me up\b",
             r"\bwake me\b.*\b(?:tomorrow|tonight|morning|at\s+\d|domani|stasera)\b",
             r"\balarm\b.*\b(?:tomorrow|tonight|morning|at\s+\d|domani|stasera)\b",
+            r"\b(?:set|create|make|imposta|metti)?\s*alarm\b.*\b(?:in|for|after)\s+"
+            r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|a|an)\s*"
+            r"(?:minutes?|mins?|hours?|hrs?|seconds?|secs?)\b",
             r"\bsvegliami\b",
         ),
         h_alarm_set,
