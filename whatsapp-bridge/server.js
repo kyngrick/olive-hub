@@ -22,6 +22,10 @@ if (!TOKEN) {
 fs.mkdirSync(SESSION, { recursive: true });
 
 const state = { status: 'starting', lastError: '', qrAt: 0, sent: 0 };
+function msgId(m) {
+  const id = m && m.id;
+  return (id && (id._serialized || id.$1)) || (typeof id === 'string' ? id : '') || '';
+}
 let contactsCache = { at: 0, list: [] };
 
 async function getContacts() {
@@ -117,6 +121,17 @@ app.get('/qr', (req, res) => {
   res.sendFile(QR_PNG);
 });
 
+app.get('/me', async (req, res) => {
+  try {
+    const me = (client && client.info && client.info.wid) || (client && client.info && client.info.me) || {};
+    const number = me.user || me._serialized || me.$1 || '';
+    const name = (client && client.info && (client.info.pushname || client.info.name)) || '';
+    res.json({ ok: true, number: String(number), name: String(name) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
 app.get('/contacts', async (req, res) => {
   try {
     const q = String(req.query.q || '').toLowerCase().trim();
@@ -155,7 +170,7 @@ app.post('/send', async (req, res) => {
     }
     const message = await client.sendMessage(chatId, text);
     state.sent += 1;
-    res.json({ ok: true, id: message.id._serialized, to: chatId });
+    res.json({ ok: true, id: msgId(message), to: chatId });
   } catch (e) {
     state.lastError = String(e);
     res.status(500).json({ ok: false, error: String(e) });

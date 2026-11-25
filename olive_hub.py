@@ -232,7 +232,11 @@ class Settings:
         "You are Olive, a calm, concise voice assistant in a living room in Italy. "
         "Answer in one or two short spoken sentences. Never use markdown, lists, "
         "URLs, emoji or stage directions. Use the recent conversation for context. "
-        "Never claim you switched a light or appliance unless the system already did it."
+        "Never claim you switched a light or appliance unless the system already did it. "
+        "WhatsApp messaging, alarms, timers and reminders are working local capabilities; "
+        "if asked whether you can do them, say yes. Do not claim a capability is "
+        "unavailable because you personally cannot execute it — commands are handled "
+        "by dedicated local handlers before a question reaches you."
     )
     asr_empty_placeholder: str = "olive"  # wakes the assistant when the STT is empty
 
@@ -3857,10 +3861,12 @@ def _is_phone_number(value: str) -> bool:
 async def h_whatsapp_send(text: str, match, ctx: Context) -> Reply:
     groups = match.groupdict() if match else {}
     contact = str(groups.get("contact") or "").strip(" ,.")
+    contact = re.sub(r"\s+(?:too|also|please)$", "", contact, flags=re.IGNORECASE).strip(" ,.")
     body = wa_message_from(str(groups.get("body") or ""))
     if not contact or not body:
         hit = re.search(
-            r"\b(?:send|text|message)\s+(?:a\s+)?whatsapp\s+(?:message|msg)?\s*to\s+"
+            r"\b(?:set|write|send|create|text|message)\s+(?:a\s+)?whatsapp\s+"
+            r"(?:message|msg)?\s*to\s+"
             r"(?P<contact>.+?)\s*,?\s+(?:saying|that says|:)\s*(?P<body>.+)$",
             text, re.IGNORECASE)
         if hit:
@@ -4993,6 +4999,12 @@ INTENTS: list[Intent] = [
         r"\b(?:text|message)\s+(?P<contact>.+?)\s+on\s+whatsapp\s+"
         r"(?:saying|that says|:)?\s*(?P<body>.+)$",
         r"\bwhatsapp\s+to\s+(?P<contact>.+?)\s+saying\s+(?P<body>.+)$",
+        r"\b(?:set|write|send|create)\s+(?:a\s+)?whatsapp\s+(?:message|msg)\s+"
+        r"to\s+(?P<contact>.+?)\s*,?\s*(?:saying|that says|:)\s*(?P<body>.+)$",
+        r"\b(?:set|write|send|create)\s+(?:a\s+)?whatsapp\s+(?:message|msg)\s+"
+        r"to\s+(?P<contact>.+)$",
+        r"\bwhatsapp\s+(?:message|msg)\s+to\s+(?P<contact>.+?)\s*"
+        r"(?:saying|that says|:)\s*(?P<body>.+)$",
     ), h_whatsapp_send),
     Intent("whatsapp.status", compile_all(
         r"\bwhatsapp status\b", r"\bis whatsapp connected\b",

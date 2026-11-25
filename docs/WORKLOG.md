@@ -31,6 +31,20 @@ restart everything.
 
 ---
 
+## 2026-11-25 13:30 — WhatsApp send verified
+
+- QR link completed; bridge `status=ready`.
+- Added `/me` endpoint and robust message-id extraction to bridge server.
+- Widened `whatsapp.send` patterns (set/write/create forms, no-body ask) and
+  updated system prompt so the LLM no longer falsely claims WhatsApp is
+  unavailable. Root cause of "trouble sending": phrasings missed the intent and
+  fell through to the LLM.
+- Verified three real sends to the linked user's own number only; bridge `sent`
+  counter went 0→3 and returned real WhatsApp message IDs. No external contact
+  messaged. Report: `WHATSAPP-SEND-VERIFIED-2026-11-25.md`.
+
+---
+
 ## 2026-11-25 12:45 — WhatsApp bridge repair (awaiting QR link)
 
 - Bridge was wedged on stale Chrome profile locks for every saved session.
