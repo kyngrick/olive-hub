@@ -161,7 +161,7 @@ async def hub_health() -> dict[str, Any]:
         import aiohttp
         async with aiohttp.ClientSession() as session:
             async with session.get(HUB_URL + "/health", headers={"X-Olive-Token": TOKEN},
-                                   timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                                   timeout=aiohttp.ClientTimeout(total=8)) as resp:
                 return await resp.json(content_type=None)
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
