@@ -55,12 +55,12 @@ POST /send {"to":"+393482763421","text":"Olive bridge test - 25 Nov 2026"}
 
 Bridge health after all tests: `status=ready`, `lastError=""`, `sent=3`.
 
-## Delivery claim — precise
+## Delivery claim — confirmed
 The bridge returned a real WhatsApp message ID and its `sent` counter increased
-for each send. That confirms WhatsApp accepted the messages for delivery to the
-linked account. This bridge does **not** expose per-message read/delivery
-receipts, so I am not claiming the phone displayed them — please check your
-own WhatsApp chat for the three test messages.
+for each send. **The user confirmed the test messages arrived on the phone.**
+This is now end-to-end verified: hub intent → bridge → WhatsApp → device.
+The bridge itself still does not expose per-message read receipts, so the
+confirmation comes from the user's phone rather than the API.
 
 ## Final state
 Hub healthy, WhatsApp `ready` on port 3015, session9 linked. No external

@@ -40,8 +40,9 @@ restart everything.
   unavailable. Root cause of "trouble sending": phrasings missed the intent and
   fell through to the LLM.
 - Verified three real sends to the linked user's own number only; bridge `sent`
-  counter went 0→3 and returned real WhatsApp message IDs. No external contact
-  messaged. Report: `WHATSAPP-SEND-VERIFIED-2026-11-25.md`.
+  counter went 0→3 and returned real WhatsApp message IDs. User confirmed the
+  messages arrived on the phone — end-to-end delivery verified. No external
+  contact messaged. Report: `WHATSAPP-SEND-VERIFIED-2026-11-25.md`.
 
 ---
 
