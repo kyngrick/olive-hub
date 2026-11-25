@@ -1,4 +1,4 @@
-﻿# Olive hub watchdog: keep it running and apply a requested restart.
+# Olive hub watchdog: keep it running and apply a requested restart.
 #
 # Safe to run every few minutes:
 #   * never kills or restarts a healthy hub unless a restart was requested
@@ -68,8 +68,14 @@ try {
     }
 
     # WhatsApp bridge (needs a one-time QR scan by the user).
-    # Keep this port in sync with WHATSAPP_BRIDGE_PORT / WHATSAPP_BRIDGE_URL in .env.
-    if (-not (Test-Listening 3014)) {
+    # Read the port from .env so a migrated session/port keeps working.
+    $waPortText = ''
+    foreach ($line in Get-Content -LiteralPath (Join-Path $root '.env') -ErrorAction SilentlyContinue) {
+        if ($line -match '^WHATSAPP_BRIDGE_PORT=(.*)$') { $waPortText = $Matches[1].Trim(); break }
+    }
+    if ([string]::IsNullOrWhiteSpace($waPortText)) { $waPortText = '3014' }
+    $waPort = [int]$waPortText
+    if (-not (Test-Listening $waPort)) {
         Write-Watchdog 'WhatsApp bridge is down; starting'
         $waOutput = & (Join-Path $root 'start-whatsapp-bridge.ps1') 2>&1 | Out-String
         if ($waOutput.Trim()) { Add-Content -Path $log -Value $waOutput.TrimEnd() -Encoding utf8 }

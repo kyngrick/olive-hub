@@ -31,6 +31,20 @@ restart everything.
 
 ---
 
+## 2026-11-25 12:45 — WhatsApp bridge repair (awaiting QR link)
+
+- Bridge was wedged on stale Chrome profile locks for every saved session.
+- Clean session still failed: whatsapp-web.js 1.34.8 waits for a WhatsApp Web
+  global removed by the current site; upstream fix commit 38eb45b (24 Nov) is
+  post-release.
+- Installed upstream GitHub build of whatsapp-web.js (free), created clean
+  session9, moved bridge to port 3015, made watchdog read the port from .env.
+- Bridge now reports `status=qr` with a fresh QR shown in the Review pane.
+- Waiting for the user to scan the QR before testing contacts/message send.
+- No external message sent. Details: `WHATSAPP-REPAIR-2026-11-25.md`.
+
+---
+
 ## 2026-11-25 11:55 — live alarm/reminder/message tests
 
 - Added alarm patterns for duration-based phrases ("alarm in two minutes",
