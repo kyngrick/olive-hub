@@ -80,5 +80,7 @@ never hijacked. "Stop the music" ends the queue immediately.
   "New album: Wisdom Inna D Root by Rebel Riddim"; "play more like this" →
   Rebel Riddim - Babylon Fire.
 - Autoplay: after stopping a Buju Banton track the queue advanced from
-  `/yt/-n29_pW7BF4` to `/yt/Be2mc82yt9g` automatically; "stop the music"
-  left `playing: False` and did not advance again.
+  `/yt/-n29_pW7BF4` to `/yt/mK5IS5rG3GQ` automatically; "stop the music"
+  left `playing: False` for 35 s with no further advance. A bug where the
+  generic `stop` intent cancelled playback but not the queue (so the next
+  track started anyway) was found and fixed in `stop_everything()`.

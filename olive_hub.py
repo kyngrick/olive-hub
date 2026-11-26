@@ -3070,6 +3070,7 @@ async def stop_everything(ctx: Context) -> Optional[str]:
     Returns the line to speak, or None when nothing was active so the caller
     can treat a bare "stop" as "end the conversation" instead.
     """
+    stop_yt_autoplay()  # otherwise the queue treats this as "track ended"
     if await ringing_timers(ctx):
         try:
             await ctx.device.dismiss_timers()
@@ -4220,6 +4221,9 @@ async def _yt_autoplay_worker(epoch: int) -> None:
             path = ""
         if not path:
             continue
+        # "Stop the music" may have arrived while the download was running.
+        if not _YT_QUEUE["active"] or epoch != _YT_QUEUE["epoch"]:
+            return
         global _YT_LAST_VIDEO
         _YT_LAST_VIDEO = video_id
         word = f"ytq-{int(time.time())}"
