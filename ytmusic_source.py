@@ -203,3 +203,166 @@ def download(video_id: str) -> str:
     _cleanup_cache()
     log.info("ytmusic: cached %s (%d bytes)", vid, os.path.getsize(path))
     return path
+
+
+# ---- discovery: moods, charts, new releases, similar-song queues ----
+MOOD_ALIASES = {
+    "happy": "Feel good", "feel good": "Feel good", "cheerful": "Feel good",
+    "rainy": "Sad", "rainy day": "Sad", "rain": "Sad", "gloomy": "Sad",
+    "love": "Romance", "romantic": "Romance", "romance": "Romance",
+    "chill": "Chill", "relax": "Chill", "relaxing": "Chill", "mellow": "Chill",
+    "sleep": "Sleep", "bedtime": "Sleep", "calm": "Sleep",
+    "workout": "Workout", "gym": "Workout", "exercise": "Workout",
+    "focus": "Focus", "study": "Focus", "concentrate": "Focus",
+    "party": "Party", "energetic": "Energize", "energy": "Energize",
+    "commute": "Commute", "gaming": "Gaming", "autumn": "Autumn",
+    "christmas": "Christmas", "sad": "Sad", "melancholy": "Sad",
+    "jazz": "Jazz", "blues": "Blues", "classical": "Classical",
+    "country": "Country & Americana", "hip hop": "Hip-hop", "rap": "Hip-hop",
+    "reggae": "Reggae & caribbean", "rock": "Rock", "pop": "Pop",
+    "indie": "Indie & alternative", "metal": "Metal", "k-pop": "K-Pop",
+    "j-pop": "J-Pop", "latin": "Latin", "bollywood": "Bollywood & Indian",
+    "soundtrack": "Soundtracks & musicals", "folk": "Folk & acoustic",
+    "soul": "R&B & soul", "r&b": "R&B & soul", "electronic": "Dance & electronic",
+    "dance": "Dance & electronic", "family": "Family", "folk music": "Folk & acoustic",
+}
+_MOODS: dict[str, Any] | None = None
+
+
+def _track(row: Any) -> dict[str, str]:
+    if not isinstance(row, dict):
+        return {}
+    artists = row.get("artists") or []
+    artist = ""
+    if artists and isinstance(artists[0], dict):
+        artist = str(artists[0].get("name") or "")
+    return {
+        "videoId": str(row.get("videoId") or ""),
+        "title": str(row.get("title") or "Unknown"),
+        "artist": artist or "Unknown",
+        "source": "ytmusic",
+    }
+
+
+def mood_categories() -> dict[str, Any]:
+    global _MOODS
+    if _MOODS is None:
+        yt = client()
+        if yt is None:
+            return {}
+        try:
+            _MOODS = yt.get_mood_categories() or {}
+        except Exception as exc:
+            log.warning("ytmusic: mood categories failed (%s)", exc)
+            return {}
+    return _MOODS
+
+
+def resolve_mood(text: str) -> str:
+    """Map a spoken phrase to a YouTube Music mood/genre title."""
+    query = re.sub(r"\b(?:play|put on|shuffle|some|music|musica|songs?|tracks?|"
+                   r"please|metti|riproduci|mix)\b", " ", str(text or "").lower())
+    query = re.sub(r"\s+", " ", query).strip(" ,.")
+    for key in sorted(MOOD_ALIASES, key=len, reverse=True):
+        if key in query:
+            return MOOD_ALIASES[key]
+    titles: list[str] = []
+    for group in mood_categories().values():
+        for item in group or []:
+            if isinstance(item, dict) and item.get("title"):
+                titles.append(str(item["title"]))
+    for title in sorted(titles, key=len, reverse=True):
+        if title.lower() in query:
+            return title
+    return ""
+
+
+def mood_playlists(mood: str, limit: int = 4) -> list[dict[str, str]]:
+    yt = client()
+    if yt is None:
+        return []
+    params = ""
+    for group in mood_categories().values():
+        for item in group or []:
+            if isinstance(item, dict) and str(item.get("title", "")).lower() == mood.lower():
+                params = str(item.get("params") or "")
+                break
+        if params:
+            break
+    if not params:
+        return []
+    try:
+        rows = yt.get_mood_playlists(params) or []
+    except Exception as exc:
+        log.warning("ytmusic: mood playlists failed (%s)", exc)
+        return []
+    return [{"title": str(r.get("title") or ""),
+             "playlistId": str(r.get("playlistId") or "")}
+            for r in rows[:limit] if r.get("playlistId")]
+
+
+def playlist_tracks(playlist_id: str, limit: int = 20) -> list[dict[str, str]]:
+    yt = client()
+    if yt is None or not playlist_id:
+        return []
+    try:
+        row = yt.get_playlist(playlist_id, limit=limit) or {}
+    except Exception as exc:
+        log.warning("ytmusic: playlist failed (%s)", exc)
+        return []
+    return [t for t in (_track(x) for x in (row.get("tracks") or [])) if t["videoId"]][:limit]
+
+
+def trending(limit: int = 10) -> list[dict[str, str]]:
+    yt = client()
+    if yt is None:
+        return []
+    try:
+        explore = yt.get_explore() or {}
+    except Exception as exc:
+        log.warning("ytmusic: explore failed (%s)", exc)
+        return []
+    rows = (explore.get("trending") or {}).get("items") or []
+    return [t for t in (_track(x) for x in rows) if t["videoId"]][:limit]
+
+
+def new_releases(limit: int = 8) -> list[dict[str, str]]:
+    yt = client()
+    if yt is None:
+        return []
+    try:
+        rows = (yt.get_explore() or {}).get("new_releases") or []
+    except Exception as exc:
+        log.warning("ytmusic: explore failed (%s)", exc)
+        return []
+    out: list[dict[str, str]] = []
+    for row in rows:
+        artists = row.get("artists") or []
+        artist = ""
+        if artists and isinstance(artists[0], dict):
+            artist = str(artists[0].get("name") or "")
+        out.append({
+            "title": str(row.get("title") or "Unknown"),
+            "artist": artist,
+            "type": str(row.get("type") or ""),
+            "browseId": str(row.get("browseId") or ""),
+            "audioPlaylistId": str(row.get("audioPlaylistId") or ""),
+        })
+    return out[:limit]
+
+
+def album_tracks(audio_playlist_id: str, limit: int = 12) -> list[dict[str, str]]:
+    return playlist_tracks(audio_playlist_id, limit)
+
+
+def similar_tracks(video_id: str, limit: int = 20) -> list[dict[str, str]]:
+    """YouTube's own radio queue: tracks similar to the current song."""
+    yt = client()
+    if yt is None or not video_id:
+        return []
+    try:
+        row = yt.get_watch_playlist(video_id, radio=True, limit=limit) or {}
+    except Exception as exc:
+        log.warning("ytmusic: radio queue failed (%s)", exc)
+        return []
+    return [t for t in (_track(x) for x in (row.get("tracks") or [])) if t["videoId"]][:limit]

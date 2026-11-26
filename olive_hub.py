@@ -2849,6 +2849,7 @@ async def h_stop_music(text: str, match, ctx: Context) -> Reply:
         with contextlib.suppress(Exception):
             await ctx.device.stop_radio()
     ctx.paused_station = None
+    stop_yt_autoplay()
     return Reply("Stopped.", intent="music.stop")
 
 
@@ -4169,6 +4170,115 @@ async def _echo_play_track(ctx: Context, track: dict[str, Any]) -> bool:
         return False
 
 
+# ---- YouTube Music autoplay queue -------------------------------------
+# The Echo's radio API plays one URL; the hub advances the queue when the
+# current track finishes. It only ever advances while our own /yt/ URL is
+# involved, so alarms and other playback are never hijacked.
+_YT_QUEUE: dict[str, Any] = {"tracks": [], "pos": 0, "active": False, "epoch": 0}
+_YT_DEVICE: Any = None
+_YT_RADIO: Any = None
+_YT_LAST_VIDEO = ""
+
+
+def stop_yt_autoplay() -> None:
+    _YT_QUEUE.update(tracks=[], pos=0, active=False, epoch=_YT_QUEUE["epoch"] + 1)
+
+
+async def _yt_autoplay_worker(epoch: int) -> None:
+    idle = 0
+    while _YT_QUEUE["active"] and epoch == _YT_QUEUE["epoch"]:
+        await asyncio.sleep(3)
+        if _YT_DEVICE is None:
+            return
+        try:
+            result = await _YT_DEVICE.call("GET", "/integrations/radio", timeout=8)
+            data = (result or {}).get("data") or {}
+            playing = bool(data.get("playing"))
+            url = str(data.get("playing_url") or "")
+        except Exception:
+            continue
+        if "/yt/" in url and playing:
+            idle = 0
+            continue
+        if url and "/yt/" not in url:
+            stop_yt_autoplay()  # alarm or another source took the speaker
+            return
+        idle = idle + 1 if not playing else 0
+        if idle < 2:
+            continue
+        tracks = list(_YT_QUEUE["tracks"])
+        pos = int(_YT_QUEUE["pos"])
+        if pos >= len(tracks):
+            stop_yt_autoplay()
+            return
+        video_id = tracks[pos]
+        _YT_QUEUE["pos"] = pos + 1
+        try:
+            path = await asyncio.to_thread(ytmusic_source.download, video_id)
+        except Exception as exc:
+            log.debug("yt autoplay download failed: %s", exc)
+            path = ""
+        if not path:
+            continue
+        global _YT_LAST_VIDEO
+        _YT_LAST_VIDEO = video_id
+        word = f"ytq-{int(time.time())}"
+        try:
+            await _YT_RADIO.add({"word": word, "name": "YouTube Music queue",
+                                 "url": yt_proxy_url(video_id)})
+            await _YT_DEVICE.play_radio(word)
+        except Exception as exc:
+            log.debug("yt autoplay failed: %s", exc)
+            stop_yt_autoplay()
+            return
+        idle = 0
+
+
+def start_yt_autoplay(tracks: list[dict[str, Any]]) -> None:
+    stop_yt_autoplay()
+    videos = [str(t.get("videoId") or "") for t in tracks if t.get("videoId")]
+    if len(videos) < 2:
+        return
+    _YT_QUEUE.update(tracks=videos[:12], pos=1, active=True)
+    asyncio.create_task(_yt_autoplay_worker(int(_YT_QUEUE["epoch"])))
+
+
+async def _play_yt_tracks(ctx: "Context", tracks: list[dict[str, Any]], *,
+                          shuffle: bool = False, announce: str = "",
+                          intent: str = "music.mood",
+                          autoplay: bool = True) -> Optional[Reply]:
+    """Download and play the first playable track; optionally keep a queue."""
+    global _YT_LAST_VIDEO
+    stop_yt_autoplay()
+    rows = [dict(t) for t in tracks if t.get("videoId")]
+    if not rows:
+        return None
+    if shuffle:
+        random.shuffle(rows)
+    for track in rows[:2]:
+        video_id = str(track.get("videoId") or "")
+        try:
+            path = await asyncio.wait_for(
+                asyncio.to_thread(ytmusic_source.download, video_id), timeout=90)
+        except Exception as exc:
+            log.debug("ytmusic download skipped: %s", exc)
+            path = ""
+        if not path:
+            continue
+        label = f"{track.get('artist', '')} - {track.get('title', '')}".strip(" -")
+        if await _echo_play_track(ctx, {"stream_url": yt_proxy_url(video_id),
+                                        "artist": track.get("artist", ""),
+                                        "title": track.get("title", ""),
+                                        "source": "ytmusic"}):
+            _YT_LAST_VIDEO = video_id
+            if autoplay:
+                start_yt_autoplay(rows)
+            prefix = f"{announce}. " if announce else ""
+            return Reply(f"{prefix}Playing {label} from your YouTube Music account "
+                         f"on the speaker.", intent=intent)
+    return None
+
+
 def _music_prefs_load() -> dict[str, Any]:
     try:
         with open(MUSIC_PREFS_FILE, encoding="utf-8-sig") as handle:
@@ -4381,23 +4491,9 @@ async def h_music_artist(text: str, match, ctx: Context) -> Reply:
         except Exception as exc:
             log.debug("ytmusic search skipped: %s", exc)
             yt_tracks = []
-        for yt_track in yt_tracks[:2]:
-            video_id = str(yt_track.get("videoId") or "")
-            try:
-                path = await asyncio.wait_for(
-                    asyncio.to_thread(ytmusic_source.download, video_id), timeout=90)
-            except Exception as exc:
-                log.debug("ytmusic download skipped: %s", exc)
-                path = ""
-            if not path:
-                continue
-            label = f"{yt_track.get('artist', '')} - {yt_track.get('title', '')}".strip(" -")
-            if await _echo_play_track(ctx, {"stream_url": yt_proxy_url(video_id),
-                                            "artist": yt_track.get("artist", ""),
-                                            "title": yt_track.get("title", ""),
-                                            "source": "ytmusic"}):
-                return Reply(f"Playing {label} from your YouTube Music account "
-                             f"on the speaker.", intent="music.artist")
+        reply = await _play_yt_tracks(ctx, yt_tracks, intent="music.artist")
+        if reply:
+            return reply
 
     # Speaker first: search the free catalogues and hand the best match
     # directly to the Echo's native stream player.
@@ -4472,6 +4568,29 @@ async def h_music_mood(text: str, match, ctx: Context) -> Reply:
                        "expires": time.monotonic() + ctx.settings.pending_ttl}
         return Reply(MUSIC_QUESTION, intent="music.mood")
 
+    # Your own YouTube Music account knows real moods and genres; try it
+    # before falling back to generic free-radio stations.
+    if ytmusic_source is not None and ytmusic_source.available():
+        mood = ytmusic_source.resolve_mood(query)
+        if mood:
+            try:
+                playlists = await asyncio.to_thread(
+                    ytmusic_source.mood_playlists, mood, 3)
+                rows: list[dict[str, Any]] = []
+                for playlist in playlists[:2]:
+                    rows.extend(await asyncio.to_thread(
+                        ytmusic_source.playlist_tracks, playlist["playlistId"], 12))
+                    if len(rows) >= 8:
+                        break
+            except Exception as exc:
+                log.debug("ytmusic mood failed: %s", exc)
+                rows = []
+            reply = await _play_yt_tracks(
+                ctx, rows, shuffle=bool(re.search(r"\bshuffle\b", text, re.I)),
+                announce=f"{mood} mix", intent="music.mood")
+            if reply:
+                return reply
+
     if ctx.music_assistant.enabled:
         # Native playback takes over the speaker; stop MA so both never fight.
         background(ctx.music_assistant.stop())
@@ -4490,6 +4609,76 @@ async def h_music_mood(text: str, match, ctx: Context) -> Reply:
     if not chosen:
         return Reply(f"I couldn't find a station for {query}.", intent="music.mood")
     return Reply(f"Playing {chosen.get('name')}.", intent="music.mood")
+
+
+def _yt_ready() -> bool:
+    return ytmusic_source is not None and ytmusic_source.available()
+
+
+async def h_music_trending(text: str, match, ctx: Context) -> Reply:
+    if not _yt_ready():
+        return Reply("Trending music needs YouTube Music set up on this computer.",
+                     intent="music.trending")
+    try:
+        rows = await asyncio.to_thread(ytmusic_source.trending, 10)
+    except Exception as exc:
+        log.debug("ytmusic trending failed: %s", exc)
+        rows = []
+    reply = await _play_yt_tracks(
+        ctx, rows, shuffle=bool(re.search(r"\bshuffle\b", text, re.I)),
+        announce="Trending now", intent="music.trending")
+    return reply or Reply("Couldn't load trending music right now.", intent="music.trending")
+
+
+async def h_music_new(text: str, match, ctx: Context) -> Reply:
+    if not _yt_ready():
+        return Reply("New releases need YouTube Music set up on this computer.",
+                     intent="music.new")
+    try:
+        releases = await asyncio.to_thread(ytmusic_source.new_releases, 6)
+    except Exception as exc:
+        log.debug("ytmusic new releases failed: %s", exc)
+        releases = []
+    if not releases:
+        return Reply("Couldn't check new releases right now.", intent="music.new")
+    shuffle = bool(re.search(r"\bshuffle\b", text, re.I))
+    choice = random.choice(releases[:4]) if shuffle else releases[0]
+    try:
+        rows = await asyncio.to_thread(
+            ytmusic_source.album_tracks, choice.get("audioPlaylistId", ""), 10)
+    except Exception as exc:
+        log.debug("ytmusic album failed: %s", exc)
+        rows = []
+    kind = str(choice.get("type") or "release").lower()
+    announce = f"New {kind}: {choice.get('title', '')} by {choice.get('artist', '')}"
+    reply = await _play_yt_tracks(ctx, rows, shuffle=shuffle, announce=announce,
+                                  intent="music.new")
+    return reply or Reply(f"I couldn't play {choice.get('title', '')} right now.",
+                          intent="music.new")
+
+
+async def h_music_similar(text: str, match, ctx: Context) -> Reply:
+    global _YT_LAST_VIDEO
+    video_id = str(_YT_LAST_VIDEO or "")
+    if not video_id and _YT_QUEUE["tracks"]:
+        pos = max(0, int(_YT_QUEUE["pos"]) - 1)
+        if pos < len(_YT_QUEUE["tracks"]):
+            video_id = str(_YT_QUEUE["tracks"][pos])
+    if not video_id:
+        return Reply("Play a song first, then I can play more like it.",
+                     intent="music.similar")
+    if not _yt_ready():
+        return Reply("Similar songs need YouTube Music set up on this computer.",
+                     intent="music.similar")
+    try:
+        rows = await asyncio.to_thread(ytmusic_source.similar_tracks, video_id, 20)
+    except Exception as exc:
+        log.debug("ytmusic similar failed: %s", exc)
+        rows = []
+    reply = await _play_yt_tracks(
+        ctx, rows[1:], shuffle=bool(re.search(r"\bshuffle\b", text, re.I)),
+        announce="More like this", intent="music.similar")
+    return reply or Reply("I couldn't find similar songs right now.", intent="music.similar")
 
 
 async def h_personal_fact(text: str, match, ctx: Context) -> Reply:
@@ -5264,6 +5453,24 @@ INTENTS: list[Intent] = [
         ),
         h_radio,
     ),
+    Intent("music.trending", compile_all(
+        r"\b(?:play|put on|what'?s|show me|give me)\b.*\btrending\b",
+        r"\btrending\b.*\b(?:music|songs?|hits?|tracks?)\b",
+        r"\bin\s+tendenza\b",
+    ), h_music_trending),
+    Intent("music.new", compile_all(
+        r"\bnew\s+(?:albums?|singles?|releases?|music)\b",
+        r"\b(?:play|what'?s|show me)\b.*\bnew\b.*\b(?:albums?|singles?|releases?)\b",
+        r"\bnuovi\s+album\b",
+    ), h_music_new),
+    Intent("music.similar", compile_all(
+        r"\bmore\s+like\s+this\b",
+        r"\bsimilar\s+(?:music|songs?|tracks?)\b",
+        r"\b(?:songs?|music)\s+like\s+this\b",
+        r"\bkeep\s+playing\b",
+        r"\bautoplay\b",
+        r"\bplay\s+more\s+(?:songs?|music)\b",
+    ), h_music_similar),
     Intent("music.artist", compile_all(
         r"\bplay\s+(?:me\s+)?(?:some\s+|a\s+bit\s+of\s+)?(?:music|songs?|tracks?)\s+"
         r"(?:by|from|di|of)\s+.+$",
@@ -5283,9 +5490,11 @@ INTENTS: list[Intent] = [
     Intent(
         "music.mood",
         compile_all(
-            r"\b(?:play|put on|metti|riproduci)\b.*\b(?:music|musica)\b",
-            r"\bplay\b.*\b(?:rainy ?day|chill|relax(?:ing)?|party|focus|study|sleep|workout|"
-            r"happy|sad|jazz|ambient|lofi|lo-fi)\b",
+            r"\b(?:play|put on|metti|riproduci|shuffle)\b.*\b(?:music|musica)\b",
+            r"\b(?:play|shuffle)\b.*\b(?:rainy ?day|chill|relax(?:ing)?|party|focus|study|"
+            r"sleep|workout|happy|sad|love|romance|jazz|blues|classical|reggae|rock|pop|"
+            r"ambient|lofi|lo-fi|mellow|calm|energetic)\b",
+            r"\bshuffle\b.*\b(?:happy|chill|love|sad|party|workout|focus|sleep|music)\b",
         ),
         h_music_mood,
     ),
@@ -6178,7 +6387,8 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
     }
     LISTENING_LINE = "I'm listening."
     MEDIA_INTENTS = {"radio", "music.mood", "music.stop", "music.pause", "music.resume",
-                     "music.status", "music.playlist", "music.next"}
+                     "music.status", "music.playlist", "music.next", "music.artist",
+                     "music.trending", "music.new", "music.similar"}
     chat_lock = asyncio.Lock()
 
     def chat_payload(model: str, content: str) -> dict[str, Any]:
@@ -6855,6 +7065,8 @@ async def run(settings: Optional[Settings] = None) -> None:
         await device.play_radio("olive-alert")
 
     ctx_radio = RadioLibrary(device, settings, http)
+    global _YT_DEVICE, _YT_RADIO
+    _YT_DEVICE, _YT_RADIO = device, ctx_radio
     scheduler = Scheduler(speech, alert_fn=play_alert_tone)
     ctx = Context(
         settings=settings, device=device, speech=speech, ha=ha,

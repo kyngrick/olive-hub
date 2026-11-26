@@ -45,6 +45,28 @@ kept for 7 days; `yt_cache/` is gitignored.
 
 Dependencies added: `ytmusicapi`, `yt-dlp`, `imageio-ffmpeg` (all free/local).
 
+## What you can ask for (27 Nov 2026)
+All phrases play through the Echo from your own account:
+
+- **Moods / genres** (YouTube Music's own categories): "shuffle happy music",
+  "play rainy day songs" (→ Sad), "play love music" (→ Romance),
+  "chill", "sleep", "workout", "focus", "party", "jazz", "reggae", "rock",
+  "classical", "country", "hip hop", and 30+ more.
+- **Trending**: "play trending music" — the exact Trending list from the
+  web UI (e.g. "Victory Lap" by Geolier).
+- **New albums & singles**: "play new albums" / "what's new" — starts with
+  the first new release (e.g. "Wisdom Inna D Root" by Rebel Riddim).
+- **Similar songs**: "more like this", "play similar songs", "keep playing",
+  "autoplay" — uses YouTube's own radio queue from the last played song.
+- **Artist / song**: "play music by buju banton" (unchanged).
+
+## Autoplay
+Every YouTube Music playback loads a queue of up to 12 tracks (YouTube radio
+for artists/similar, playlist for moods, chart/album for trending/new). When
+the current track finishes, the hub downloads and starts the next one. It only
+advances while its own `/yt/` URL is active, so alarms or other sources are
+never hijacked. "Stop the music" ends the queue immediately.
+
 ## Verification — 27 Nov 2026 (passed)
 - `ytmusic_source.available()` → `True`; authenticated search returned 20 songs.
 - `play music by buju banton champion` → "Playing Buju Banton - Champion from
@@ -52,3 +74,11 @@ Dependencies added: `ytmusicapi`, `yt-dlp`, `imageio-ffmpeg` (all free/local).
 - Echo fetched `/yt/nMD4GumDjxA` once, `200` with 3,797,884 bytes (no retries),
   and `/integrations/radio` reported `playing: True` 30 s later.
 - Hub health `ok`; `/alert-tone.wav` still `200`; playback stopped afterwards.
+- Moods: "shuffle happy music" → Feel good mix (Parcels), "play rainy day songs"
+  → Sad mix (Olivia Rodrigo), "play love music" → Romance mix (Taylor Swift).
+- "play trending music" → Geolier - Victory Lap; "play new albums" →
+  "New album: Wisdom Inna D Root by Rebel Riddim"; "play more like this" →
+  Rebel Riddim - Babylon Fire.
+- Autoplay: after stopping a Buju Banton track the queue advanced from
+  `/yt/-n29_pW7BF4` to `/yt/Be2mc82yt9g` automatically; "stop the music"
+  left `playing: False` and did not advance again.
