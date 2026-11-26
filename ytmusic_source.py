@@ -27,6 +27,24 @@ _init_tried = False
 _url_cache: dict[str, tuple[float, str]] = {}
 
 
+def _normalise_headers(raw: str) -> str:
+    """Accept raw 'key: value' lines or a cURL command copied from DevTools."""
+    if re.match(r"^\s*curl(\.exe)?\s", raw, re.IGNORECASE):
+        pairs = re.findall(r"""-H\s+(?:'([^']*)'|"([^"]*)")""", raw,
+                           re.IGNORECASE | re.DOTALL)
+        lines = [before or after for before, after in pairs]
+        if not lines:
+            raise ValueError("cURL command contained no -H headers")
+        raw = "\n".join(lines)
+    if not re.search(r"(?mi)^cookie\s*:", raw):
+        raise ValueError("no 'cookie:' header found in the pasted text")
+    # Some logged-in requests omit this header; ytmusicapi requires it.
+    # "0" selects the (single) default signed-in Google account.
+    if not re.search(r"(?mi)^x-goog-authuser\s*:", raw):
+        raw = raw.rstrip() + "\nx-goog-authuser: 0\n"
+    return raw
+
+
 def ensure_auth() -> bool:
     """Convert pasted DevTools headers into a ytmusicapi auth file once."""
     if os.path.exists(AUTH_FILE):
@@ -35,11 +53,7 @@ def ensure_auth() -> bool:
         return False
     try:
         with open(HEADERS_FILE, encoding="utf-8-sig") as handle:
-            raw = handle.read()
-        # Some logged-in requests omit this header; ytmusicapi requires it.
-        # "0" selects the (single) default signed-in Google account.
-        if not re.search(r"(?mi)^x-goog-authuser\s*:", raw):
-            raw = raw.rstrip() + "\nx-goog-authuser: 0\n"
+            raw = _normalise_headers(handle.read())
         from ytmusicapi import setup
         setup(headers_raw=raw, filepath=AUTH_FILE)
         log.info("ytmusic: generated %s from pasted headers", os.path.basename(AUTH_FILE))

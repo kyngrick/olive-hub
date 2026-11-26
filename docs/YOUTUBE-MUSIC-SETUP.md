@@ -17,12 +17,13 @@ on this PC.
 2. Press **F12** → **Network** tab → reload the page.
 3. Select a `POST` request to `music.youtube.com/youtubei/v1/browse`
    (click around the site first if needed).
-4. Right-click the request → **Copy → Copy request headers**.
+4. Right-click the request → **Copy → Copy request headers**. If your Chrome
+   menu has no such item, use **Copy as cURL (powershell)** (or bash/cmd) —
+   the hub parses cURL commands too.
 5. Paste the text into:
    `C:\Users\Geggais and Rick\Documents\Codex\olive_assist_v2\ytmusic-headers.txt`
-6. The pasted text must include lines beginning `cookie:` and
-   `x-goog-authuser:`. If `x-goog-authuser` is missing, copy a different
-   `/browse` request from a logged-in page.
+6. The pasted text must include a `cookie:`. If `x-goog-authuser:` is missing,
+   the hub adds `x-goog-authuser: 0` (default account) automatically.
 
 On the next hub start, `ytmusic_source.ensure_auth()` converts that file once
 into `ytmusic-auth.json` using `ytmusicapi.setup(headers_raw=...)`. Both files
