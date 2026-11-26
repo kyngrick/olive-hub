@@ -2012,6 +2012,27 @@ async def alert_tone_route(_request: web.Request) -> web.Response:
         return web.Response(status=404)
 
 
+# GoogleVideo URLs are >1 KB and the Echo rejects station URLs that long.
+# ytmusic_source downloads the track into a local cache; serve it here with a
+# short, stateless URL and a proper Content-Length.
+def yt_proxy_url(video_id: str) -> str:
+    return f"http://{_local_lan_ip()}:{os.getenv('HUB_PORT', '8765')}/yt/{video_id}"
+
+
+async def yt_proxy_route(request: web.Request) -> web.Response:
+    video_id = str(request.match_info.get("token") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id) or ytmusic_source is None:
+        return web.Response(status=404)
+    path = os.path.join(ytmusic_source.CACHE_DIR, video_id + ".mp3")
+    if not os.path.isfile(path):
+        return web.Response(status=404)
+    log.info("yt: serving %s", video_id)
+    with open(path, "rb") as handle:
+        data = handle.read()
+    return web.Response(body=data, content_type="audio/mpeg",
+                        headers={"Accept-Ranges": "bytes"})
+
+
 class Scheduler:
     """Reminders and device routines that survive a hub restart."""
 
@@ -4360,18 +4381,18 @@ async def h_music_artist(text: str, match, ctx: Context) -> Reply:
         except Exception as exc:
             log.debug("ytmusic search skipped: %s", exc)
             yt_tracks = []
-        for yt_track in yt_tracks[:3]:
+        for yt_track in yt_tracks[:2]:
+            video_id = str(yt_track.get("videoId") or "")
             try:
-                url = await asyncio.wait_for(
-                    asyncio.to_thread(ytmusic_source.stream_url,
-                                      yt_track.get("videoId", "")), timeout=20)
+                path = await asyncio.wait_for(
+                    asyncio.to_thread(ytmusic_source.download, video_id), timeout=90)
             except Exception as exc:
-                log.debug("ytmusic stream skipped: %s", exc)
-                url = ""
-            if not url:
+                log.debug("ytmusic download skipped: %s", exc)
+                path = ""
+            if not path:
                 continue
             label = f"{yt_track.get('artist', '')} - {yt_track.get('title', '')}".strip(" -")
-            if await _echo_play_track(ctx, {"stream_url": url,
+            if await _echo_play_track(ctx, {"stream_url": yt_proxy_url(video_id),
                                             "artist": yt_track.get("artist", ""),
                                             "title": yt_track.get("title", ""),
                                             "source": "ytmusic"}):
@@ -6016,7 +6037,9 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
 
     @web.middleware
     async def auth(request: web.Request, handler):
-        if settings.hub_token and request.path not in ("/health", "/alert-tone.wav"):
+        if (settings.hub_token
+                and request.path not in ("/health", "/alert-tone.wav")
+                and not request.path.startswith("/yt/")):
             header = request.headers.get("X-Olive-Token") or ""
             auth = request.headers.get("Authorization") or ""
             bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
@@ -6616,6 +6639,7 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
 
     app.router.add_get("/health", health)
     app.router.add_get("/alert-tone.wav", alert_tone_route)
+    app.router.add_get("/yt/{token}", yt_proxy_route)
     async def intents_reload(_request: web.Request) -> web.Response:
         """Re-read custom_intents.json and apply atomically, with rollback."""
         global CUSTOM_INTENTS, DISABLED_INTENTS

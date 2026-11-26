@@ -30,13 +30,25 @@ into `ytmusic-auth.json` using `ytmusicapi.setup(headers_raw=...)`. Both files
 are gitignored and never leave the PC.
 
 ## Playback
-`YTMusic(auth=ytmusic-auth.json)` performs personalised search; `yt-dlp`
-resolves a direct audio URL using the same headers (cached ~4 h). The URL is
-handed to the Echo's native radio player, so the speaker plays full tracks
-without the PC acting as an audio proxy.
+`YTMusic(auth=ytmusic-auth.json)` performs personalised search. `yt-dlp`
+(resolving the current YouTube n-challenge with the installed Node.js and
+yt-dlp-ejs components) downloads the track once into `yt_cache/`, and the
+bundled `imageio-ffmpeg` binary remuxes it to a standard MP3. The hub serves
+that file at a short URL, `http://<PC-LAN-IP>:8765/yt/<videoId>`, with a proper
+`Content-Length`; the Echo's native radio player then plays the full track.
 
-## Verification checklist (once the file exists)
-- `ytmusic_source.available()` → `True`
-- `ytmusic_source.search('buju banton', 2)` → tracks with `videoId`
-- `play music by buju banton` → reply says "from your YouTube Music account"
-- Hub health still `ok`; alarm tone route still `200`
+Why the local file: the Echo rejects station URLs longer than a few hundred
+characters (GoogleVideo URLs are ~1.2 KB), it does not play chunked responses
+or DASH m4a containers reliably, and signed URLs require Range requests. A
+local MP3 with a known length avoids all three problems. Cached tracks are
+kept for 7 days; `yt_cache/` is gitignored.
+
+Dependencies added: `ytmusicapi`, `yt-dlp`, `imageio-ffmpeg` (all free/local).
+
+## Verification — 27 Nov 2026 (passed)
+- `ytmusic_source.available()` → `True`; authenticated search returned 20 songs.
+- `play music by buju banton champion` → "Playing Buju Banton - Champion from
+  your YouTube Music account on the speaker."
+- Echo fetched `/yt/nMD4GumDjxA` once, `200` with 3,797,884 bytes (no retries),
+  and `/integrations/radio` reported `playing: True` 30 s later.
+- Hub health `ok`; `/alert-tone.wav` still `200`; playback stopped afterwards.

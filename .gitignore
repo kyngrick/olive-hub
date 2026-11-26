@@ -19,6 +19,7 @@ flight_search_cache.json
 music_catalog.json
 music_cache.json
 music_prefs.json
+yt_cache/
 
 # WhatsApp bridge sessions and QR images
 whatsapp-bridge/session*/

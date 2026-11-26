@@ -20,11 +20,9 @@ log = logging.getLogger("OLIVE-HUB")
 ROOT = os.path.dirname(os.path.abspath(__file__))
 HEADERS_FILE = os.path.join(ROOT, "ytmusic-headers.txt")
 AUTH_FILE = os.path.join(ROOT, "ytmusic-auth.json")
-URL_CACHE_TTL = 4 * 3600  # GoogleVideo URLs are signed and expire in hours
 
 _client: Any = None
 _init_tried = False
-_url_cache: dict[str, tuple[float, str]] = {}
 
 
 def _normalise_headers(raw: str) -> str:
@@ -36,6 +34,19 @@ def _normalise_headers(raw: str) -> str:
         if not lines:
             raise ValueError("cURL command contained no -H headers")
         raw = "\n".join(lines)
+    # Newer Chrome DevTools copies headers as alternating name/value lines
+    # (":authority" / "music.youtube.com", "cookie" / "SOCS=..."), without
+    # the "name: value" separator. Rebuild that into the classic format.
+    entries = [line.strip() for line in raw.splitlines() if line.strip()]
+    bare_cookie = re.search(r"(?mi)^cookie\s*$", raw)
+    if entries and bare_cookie and not re.search(r"(?mi)^cookie\s*:", raw):
+        paired: list[str] = []
+        for index in range(0, len(entries) - 1, 2):
+            key, value = entries[index], entries[index + 1]
+            if re.match(r"^[A-Za-z0-9-]+$", key):
+                paired.append(f"{key}: {value}")
+        if paired:
+            raw = "\n".join(paired)
     if not re.search(r"(?mi)^cookie\s*:", raw):
         raise ValueError("no 'cookie:' header found in the pasted text")
     # Some logged-in requests omit this header; ytmusicapi requires it.
@@ -131,30 +142,64 @@ def _http_headers() -> dict[str, str]:
     return {k: str(data[k]) for k in keys if data.get(k)}
 
 
-def stream_url(video_id: str) -> str:
-    """Resolve a direct audio stream URL for a video, cached for a few hours."""
-    video_id = str(video_id or "")
-    if not video_id:
+CACHE_DIR = os.path.join(ROOT, "yt_cache")
+CACHE_TTL = 7 * 24 * 3600
+
+
+def _cleanup_cache() -> None:
+    try:
+        now = time.time()
+        for name in os.listdir(CACHE_DIR):
+            path = os.path.join(CACHE_DIR, name)
+            if os.path.isfile(path) and now - os.path.getmtime(path) > CACHE_TTL:
+                os.remove(path)
+    except Exception:
+        pass
+
+
+def download(video_id: str) -> str:
+    """Download a track once into the local cache; return its file path.
+
+    A local file with a known Content-Length is far more reliable on the
+    Echo than a 1 KB signed GoogleVideo URL (which the speaker rejects).
+    """
+    vid = re.sub(r"[^A-Za-z0-9_-]", "", str(video_id or ""))
+    if len(vid) != 11:
         return ""
-    cached = _url_cache.get(video_id)
-    if cached and time.time() - float(cached[0]) < URL_CACHE_TTL:
-        return str(cached[1])
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    path = os.path.join(CACHE_DIR, vid + ".mp3")
+    if os.path.isfile(path) and os.path.getsize(path) > 1024:
+        return path
     try:
         import yt_dlp
+        import imageio_ffmpeg
         opts = {
             "format": "bestaudio[ext=m4a]/bestaudio/best",
             "quiet": True,
             "noplaylist": True,
-            "skip_download": True,
+            "outtmpl": os.path.join(CACHE_DIR, vid),
+            "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "128",
+            }],
             "http_headers": _http_headers(),
+            # YouTube serves SABR-only formats that need an n-challenge solver;
+            # Node.js is already installed for the WhatsApp bridge.
+            "js_runtimes": {"node": {}},
+            "remote_components": ["ejs:github"],
         }
         with yt_dlp.YoutubeDL(opts) as downloader:
-            info = downloader.extract_info(
-                "https://www.youtube.com/watch?v=" + video_id, download=False)
-        url = str((info or {}).get("url") or "")
+            downloader.extract_info(
+                "https://www.youtube.com/watch?v=" + vid, download=True)
     except Exception as exc:
-        log.warning("ytmusic: stream resolution failed for %s (%s)", video_id, exc)
+        log.warning("ytmusic: download failed for %s (%s)", vid, exc)
+        if os.path.isfile(path):
+            os.remove(path)
         return ""
-    if url:
-        _url_cache[video_id] = (time.time(), url)
-    return url
+    if not os.path.isfile(path) or os.path.getsize(path) < 1024:
+        return ""
+    _cleanup_cache()
+    log.info("ytmusic: cached %s (%d bytes)", vid, os.path.getsize(path))
+    return path
