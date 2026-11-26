@@ -154,6 +154,41 @@ def archive(query="", genre="", limit=5):
     return out
 
 
+def itunes(query="", genre="", limit=10):
+    """Apple Music catalogue: exact artists/titles, legal 30-second previews."""
+    p = {"term": query or genre or "music", "entity": "song",
+         "limit": limit, "country": "US"}
+    data = get_json("https://itunes.apple.com/search", p)
+    out = []
+    for t in data.get("results", []):
+        url = t.get("previewUrl") or ""
+        if not url:
+            continue
+        out.append(Track("itunes", str(t.get("trackId", "")), t.get("trackName", ""),
+                         t.get("artistName", ""), t.get("collectionName", ""),
+                         t.get("primaryGenreName", "") or genre,
+                         _seconds(t.get("trackTimeMillis") / 1000 if t.get("trackTimeMillis") else 0),
+                         url, "Apple Music 30s preview", t.get("artworkUrl100", "")))
+    return out
+
+
+def deezer(query="", genre="", limit=10):
+    """Deezer catalogue: exact artists/titles, legal 30-second previews."""
+    data = get_json("https://api.deezer.com/search",
+                    {"q": query or genre or "music", "limit": limit})
+    out = []
+    for t in data.get("data", []):
+        url = t.get("preview") or ""
+        if not url:
+            continue
+        artist = (t.get("artist") or {}).get("name", "")
+        album = (t.get("album") or {})
+        out.append(Track("deezer", str(t.get("id", "")), t.get("title", ""), artist,
+                         album.get("title", ""), genre, 30, url,
+                         "Deezer 30s preview", album.get("cover_medium", "")))
+    return out
+
+
 def radio(query="", genre="", limit=10):
     p = {"limit": limit, "hidebroken": "true", "order": "clickcount", "reverse": "true"}
     if genre:
@@ -168,7 +203,8 @@ def radio(query="", genre="", limit=10):
     return out
 
 
-PROVIDERS = {"jamendo": jamendo, "audius": audius, "archive": archive, "radio": radio}
+PROVIDERS = {"itunes": itunes, "deezer": deezer, "jamendo": jamendo,
+             "audius": audius, "archive": archive, "radio": radio}
 
 
 def search(query="", genre="", source="all", limit=10):

@@ -13,6 +13,12 @@ def test_seconds_parser():
     assert freemusic._seconds("bad") == 0
 
 
+def test_mainstream_sources_registered():
+    assert "itunes" in freemusic.PROVIDERS
+    assert "deezer" in freemusic.PROVIDERS
+    assert "audius" in freemusic.PROVIDERS
+
+
 def test_track_fields():
     t = freemusic.Track("audius", "id", "Title", "Artist", "Album", "Hip Hop",
                         120, "https://example/stream.mp3", "CC-BY", "https://art")

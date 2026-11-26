@@ -43,6 +43,16 @@ restart everything.
 - REST `serve` mode tested on port 8770. Added `tests/test_freemusic.py` (pass).
 - Report: `FREEMUSIC-INTEGRATION-2026-11-26.md`. 9/9 services healthy.
 
+## 2026-11-26 20:10 — mainstream catalog previews
+
+- Researched free legal mainstream sources: iTunes Search API and Deezer API
+  (30-second previews, no key); full masters need a paid subscription.
+- Added itunes/deezer providers to freemusic.py with normalized fields; hub now
+  searches iTunes -> Deezer -> Audius -> Jamendo -> Archive with caching.
+- Echo remains first output; spoken reply labels the 30s preview honestly.
+- Verified live: Buju Banton 1.4 s, Stephen Marley 1.3 s, exact artists.
+- Tests pass; 9/9 services healthy. Report: MAINSTREAM-MUSIC-RESEARCH-2026-11-26.md.
+
 ## 2026-11-26 18:10 — music latency/relevance fix
 
 - Root causes: Whisper misheard artist names (`budubantan`, `a little wind`);

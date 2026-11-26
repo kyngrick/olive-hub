@@ -4170,11 +4170,19 @@ def _free_music_tracks(query: str, limit: int = 8) -> list[dict[str, Any]]:
 
     tokens = [t for t in re.findall(r"[a-z0-9]+", key) if len(t) > 2]
     min_score = 2 if len(tokens) >= 2 else 1
-    tracks = _music_sources(query, "", "audius", limit)
+    # Mainstream catalogues first: free legal 30-second previews from Apple
+    # Music / Deezer give exact artist matches, unlike CC/remix catalogues.
+    tracks = _music_sources(query, "", "itunes", limit)
     relevant = [t for t in tracks if _music_relevance(key, t) >= min_score]
+    if len(relevant) < max(2, limit // 2):
+        extra = _music_sources(query, "", "deezer", limit)
+        relevant += [t for t in extra if _music_relevance(key, t) >= min_score]
     # A multi-word artist with no Audius match is unlikely to be rescued by
     # slower generic archives; go straight to the genre fallback instead of
     # making the user wait 6+ seconds for unrelated results.
+    if len(relevant) < max(2, limit // 2) and (len(tokens) == 1 or relevant):
+        extra = _music_sources(query, "", "audius", limit)
+        relevant += [t for t in extra if _music_relevance(key, t) >= min_score]
     if len(relevant) < max(2, limit // 2) and (len(tokens) == 1 or relevant):
         extra = _music_sources(query, "", "archive", limit)
         relevant += [t for t in extra if _music_relevance(key, t) >= min_score]
@@ -4189,7 +4197,9 @@ def _free_music_tracks(query: str, limit: int = 8) -> list[dict[str, Any]]:
         if marker not in seen:
             seen.add(marker)
             unique.append(t)
-    unique.sort(key=lambda t: (-_music_relevance(query, t), t.get("source") != "audius"))
+    source_rank = {"itunes": 0, "deezer": 1, "audius": 2, "jamendo": 3, "archive": 4}
+    unique.sort(key=lambda t: (-_music_relevance(query, t),
+                               source_rank.get(t.get("source"), 9)))
     _MUSIC_CACHE[key] = {"at": time.time(), "query": query,
                          "tracks": unique[:20]}
     _music_cache_save()
@@ -4257,8 +4267,9 @@ async def h_music_artist(text: str, match, ctx: Context) -> Reply:
     if free_tracks and await _echo_play_track(ctx, free_tracks[0]):
         first = free_tracks[0]
         label = f"{first.get('artist', '')} - {first.get('title', '')}".strip(" -")
+        note = f" ({first['license']})" if first.get("license") else ""
         return Reply(f"Playing {label} from {first.get('source', 'free music')} "
-                     f"on the speaker.", intent="music.artist")
+                     f"on the speaker{note}.", intent="music.artist")
 
     if not free_tracks and search_query in GENRE_FALLBACK:
         tag = GENRE_FALLBACK[search_query]
