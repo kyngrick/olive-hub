@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -35,6 +36,10 @@ def ensure_auth() -> bool:
     try:
         with open(HEADERS_FILE, encoding="utf-8-sig") as handle:
             raw = handle.read()
+        # Some logged-in requests omit this header; ytmusicapi requires it.
+        # "0" selects the (single) default signed-in Google account.
+        if not re.search(r"(?mi)^x-goog-authuser\s*:", raw):
+            raw = raw.rstrip() + "\nx-goog-authuser: 0\n"
         from ytmusicapi import setup
         setup(headers_raw=raw, filepath=AUTH_FILE)
         log.info("ytmusic: generated %s from pasted headers", os.path.basename(AUTH_FILE))
