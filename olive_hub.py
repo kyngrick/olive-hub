@@ -1166,6 +1166,32 @@ class MusicAssistant:
         await self.ok("player_queues/play", 4.0, queue_id=queue)
         return True
 
+    async def search(self, query: str, media_types: Optional[list[str]] = None,
+                     limit: int = 20) -> dict[str, Any]:
+        """Search the connected MA music providers. Empty dict means unavailable."""
+        if not self.enabled or not query:
+            return {}
+        result = await self.call(
+            "music/search", timeout=20,
+            search_query=query,
+            media_types=media_types or ["track", "album", "artist", "playlist", "radio"],
+            limit=limit,
+        )
+        return result if isinstance(result, dict) else {}
+
+    async def queue_uris(self, uris: list[str]) -> bool:
+        """Queue a list of MA media URIs on the configured player."""
+        uris = [u for u in uris if u]
+        if not self.enabled or not uris:
+            return False
+        queue = self.settings.ma_player_id
+        await self.ok("player_queues/clear", 5.0, queue_id=queue)
+        if not await self.ok("player_queues/play_media", 20.0,
+                             queue_id=queue, media=uris):
+            return False
+        await self.ok("player_queues/play", 5.0, queue_id=queue)
+        return True
+
     async def stop(self) -> bool:
         if not self.enabled:
             return False
@@ -4014,6 +4040,87 @@ async def h_messenger(text: str, match, ctx: Context) -> Reply:
     return Reply(result or "Message sent.", intent="messenger")
 
 
+def _artist_query(text: str) -> str:
+    """Extract an artist/genre phrase from a 'play music by X' request."""
+    cleaned = str(text or "")
+    cleaned = re.sub(r"^(?:alexa[,\s]+)?(?:please\s+)?", "", cleaned,
+                     flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"^\s*(?:play|put on|start|riproduci|metti)\s+"
+        r"(?:me\s+)?(?:some\s+|a\s+bit\s+of\s+|the\s+)?",
+        "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"^\s*(?:music|songs?|tracks?|musica|canzoni)\s+"
+        r"(?:by|from|di|of)\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(?:music|songs?|tracks?|musica|canzoni|please)\b", " ",
+                     cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.?!:")
+    return cleaned
+
+
+async def _ma_artist_reply(query: str, ctx: Context) -> Optional[Reply]:
+    """Try MA track search and queue all results for the artist/genre."""
+    data = await ctx.music_assistant.search(query, limit=25)
+    if not data:
+        return None
+    tracks = [t for t in (data.get("tracks") or []) if isinstance(t, dict)]
+    if not tracks:
+        return None
+    uris, names = [], []
+    for track in tracks[:25]:
+        uri = track.get("uri")
+        if not uri:
+            provider = track.get("provider") or track.get("provider_instance")
+            item_id = track.get("item_id")
+            if provider and item_id:
+                uri = f"{provider}://{item_id}"
+        if uri:
+            uris.append(uri)
+            names.append(str(track.get("name") or ""))
+    if not uris:
+        return None
+    if not await ctx.music_assistant.queue_uris(uris):
+        return None
+    label = f"{len(uris)} track{'s' if len(uris) != 1 else ''} by {query}"
+    return Reply(f"Playing {label} on Music Assistant: {', '.join(n for n in names[:3] if n)}.",
+                 intent="music.artist")
+
+
+async def h_music_artist(text: str, match, ctx: Context) -> Reply:
+    query = _artist_query(text)
+    if not query:
+        ctx.pending = {"kind": "music", "prompt": MUSIC_QUESTION,
+                       "expires": time.monotonic() + ctx.settings.pending_ttl}
+        return Reply(MUSIC_QUESTION, intent="music.artist")
+
+    # Generic crowd phrases map to a well-known genre seed.
+    genre_map = {
+        "rappers": "hip hop rap", "rappers music": "hip hop rap",
+        "rap": "hip hop rap", "hip hop": "hip hop rap",
+        "rockers": "rock", "singers": "pop music",
+    }
+    search_query = genre_map.get(query.lower(), query)
+
+    if ctx.music_assistant.enabled:
+        reply = await _ma_artist_reply(search_query, ctx)
+        if reply is not None:
+            return reply
+        # Native playback takes over the speaker; stop MA before falling back.
+        background(ctx.music_assistant.stop())
+
+    # Fallback: find a real YouTube video/mix and play it on the TV.
+    url, resolved = await resolve_youtube_url(ctx.http, f"{search_query} music mix")
+    awake = await ctx.tv.ensure_awake()
+    if awake.ok:
+        result = await ctx.tv.adb_view_url(url, package="com.google.android.youtube.tv")
+        if result.ok:
+            return Reply(f"Playing {search_query} on the TV from YouTube.",
+                         intent="music.artist")
+    background(asyncio.to_thread(webbrowser.open, url))
+    return Reply(f"I couldn't queue {search_query} on Music Assistant, so I opened "
+                 f"YouTube on the computer.", intent="music.artist")
+
+
 async def h_music_mood(text: str, match, ctx: Context) -> Reply:
     query = re.sub(r"\b(?:play|put on|metti|riproduci|some|a bit of|the)\b",
                    " ", text, flags=re.IGNORECASE)
@@ -4816,6 +4923,13 @@ INTENTS: list[Intent] = [
         ),
         h_radio,
     ),
+    Intent("music.artist", compile_all(
+        r"\bplay\s+(?:me\s+)?(?:some\s+|a\s+bit\s+of\s+)?(?:music|songs?|tracks?)\s+"
+        r"(?:by|from|di|of)\s+.+$",
+        r"\bplay\s+(?:me\s+)?(?:some\s+|a\s+bit\s+of\s+)?(?:rappers?|hip\s*hop|rap)\b",
+        r"\b(?:play|put on)\s+(?:music\s+by|songs\s+by)\s+.+$",
+        r"\briproduci\s+(?:della\s+musica\s+di|canzoni\s+di)\s+.+$",
+    ), h_music_artist),
     Intent(
         "radio",
         compile_all(

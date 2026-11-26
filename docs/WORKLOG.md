@@ -31,6 +31,21 @@ restart everything.
 
 ---
 
+## 2026-11-26 08:20 — artist-based music search
+
+- Restarted Music Assistant container (HTTP endpoint had stopped responding).
+- Added `music.artist` intent before radio/mood and handler that extracts the
+  artist/genre, maps "rappers" to hip hop rap, tries MA `music/search` +
+  multi-track queue first, and falls back to YouTube on the TV.
+- Verified live: "play music by little wayne" and "play music by rappers" both
+  route to `music.artist` and start playback on the TV.
+- MA search/queue path tested with simulated response (3 URIs queued).
+- Limitation: MA has no track library provider (only radio/metadata), so searches
+  return no tracks; YouTube fallback is used until a music provider is added.
+- Hub healthy: 112 intents, 9/9 services. Report: `MUSIC-ARTIST-SEARCH-2026-11-26.md`.
+
+---
+
 ## 2026-11-25 13:30 — WhatsApp send verified
 
 - QR link completed; bridge `status=ready`.
