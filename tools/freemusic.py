@@ -19,6 +19,25 @@ import urllib.parse, urllib.request
 from dataclasses import dataclass, asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+def _load_dotenv():
+    """Load KEY=VALUE lines from .env without overriding real env vars."""
+    for candidate in (os.path.join(os.getcwd(), ".env"),
+                      os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")):
+        try:
+            with open(candidate, encoding="utf-8-sig") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, value = line.split("=", 1)
+                    os.environ.setdefault(key.strip(), value.strip())
+            # Do not stop at a home-directory .env that may lack our keys.
+        except OSError:
+            pass
+
+
+_load_dotenv()
+
 APP = "freemusic-sendspin"
 UA = f"{APP}/0.1 (personal use)"
 
@@ -67,7 +86,7 @@ def jamendo(query="", genre="", limit=10):
     if not cid:
         return []
     p = {"client_id": cid, "format": "json", "limit": limit,
-         "include": "musicinfo", "audioformat": "mp32"}
+         "include": "musicinfo"}
     if query:
         p["search"] = query
     if genre:

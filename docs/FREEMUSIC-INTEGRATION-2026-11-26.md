@@ -22,17 +22,31 @@
 
 ## Hub integration
 `music.artist` order is now:
-1. Music Assistant catalog search (`music/search`) → queue all matching tracks.
-2. **Free sources** (`freemusic.search`: Audius, Archive, optional Jamendo) →
-   queue up to 8 stream URLs on Music Assistant with a spoken source/licence note.
+1. **Echo speaker first** — free sources (`freemusic.search`: Audius, Archive,
+   Jamendo when configured) are searched, and the best match is added as a
+   temporary station and played through the Echo's native stream API.
+2. Music Assistant catalog search / multi-track queue (also reaches the Echo via
+   Sendspin) if the direct speaker path fails.
 3. YouTube mix on the TV / PC browser as last resort.
 
-Verified live:
+Verified live after the update:
 ```
-play music by little wayne -> Playing 2 tracks for little wayne from audius on Music Assistant …
-play music by rappers      -> Playing 8 tracks for rappers from audius on Music Assistant …
+play music by little wayne -> Playing Ye - ... (feat. Little Brother & Lil_ Wayne) from audius on the speaker.
+play music by rappers      -> Playing Beats Love - INSTRUMENTAL HIP HOP RAP BEAT from audius on the speaker.
 ```
-MA reported `playing=True` after both commands.
+Direct Echo playback was independently verified: the device reported
+`playback_supported: true`, `playing: true` and the exact stream URL.
+
+## Jamendo credentials
+Added `JAMENDO_CLIENT_ID=ff2f1725` to `.env` (client secret is not needed for
+the tracks endpoint and should not be stored in plain text in the project).
+Jamendo returned valid fields: id, name, artist_name, album_name, duration,
+audio, license_ccurl, image, musicinfo.tags.genres. Two fixes were needed:
+- `audioformat=mp32` now yields zero results — removed (API default mp31 works).
+- The standalone script's `.env` loader stopped at the first `.env` it found
+  (home directory) — fixed to check the script directory too.
+Jamendo occasionally returns zero results transiently; Audius/Archive remain as
+fallbacks, so a failed source never breaks the command.
 
 ## Licence note
 Each result reports a licence where the source provides one; the spoken reply

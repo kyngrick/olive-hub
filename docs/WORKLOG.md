@@ -43,6 +43,16 @@ restart everything.
 - REST `serve` mode tested on port 8770. Added `tests/test_freemusic.py` (pass).
 - Report: `FREEMUSIC-INTEGRATION-2026-11-26.md`. 9/9 services healthy.
 
+## 2026-11-26 16:00 — Jamendo key + Echo-first output
+
+- Added `JAMENDO_CLIENT_ID` to .env; verified Jamendo fields live. Fixed two
+  issues in `freemusic.py`: `audioformat=mp32` returns zero (removed) and the
+  standalone `.env` loader stopped at the home .env (now checks project too).
+- Changed `music.artist` priority: free-source match is now played **directly on
+  the Echo speaker** via its native stream/radio API before MA/TV fallbacks.
+- Verified live: "play music by little wayne" and "play music by rappers" both
+  replied "...on the speaker"; device playback confirmed independently.
+
 ---
 
 ## 2026-11-26 08:20 — artist-based music search

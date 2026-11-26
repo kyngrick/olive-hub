@@ -4090,6 +4090,24 @@ async def _ma_artist_reply(query: str, ctx: Context) -> Optional[Reply]:
                  intent="music.artist")
 
 
+async def _echo_play_track(ctx: Context, track: dict[str, Any]) -> bool:
+    """Play a stream directly on the Echo speaker via its native radio API."""
+    url = str(track.get("stream_url") or "")
+    if not url:
+        return False
+    word = f"free-{int(time.time())}"
+    name = f"{track.get('artist', '')} - {track.get('title', '')}".strip(" -")[:55] or "Free music"
+    try:
+        added = await ctx.radio.add({"word": word, "name": name, "url": url})
+        if not added:
+            return False
+        result = await ctx.device.play_radio(word)
+        return bool((result or {}).get("ok", False))
+    except Exception as exc:
+        log.debug("native Echo playback failed: %s", exc)
+        return False
+
+
 def _free_music_tracks(query: str, limit: int = 8) -> list[dict[str, Any]]:
     """Search the local freemusic providers (Audius, Archive, optional Jamendo)."""
     if freemusic is None:
@@ -4128,13 +4146,22 @@ async def h_music_artist(text: str, match, ctx: Context) -> Reply:
     }
     search_query = genre_map.get(query.lower(), query)
 
+    # Speaker first: search the free catalogues and hand the best match
+    # directly to the Echo's native stream player.
+    free_tracks = await asyncio.to_thread(_free_music_tracks, search_query, 8)
+    if free_tracks and await _echo_play_track(ctx, free_tracks[0]):
+        first = free_tracks[0]
+        label = f"{first.get('artist', '')} - {first.get('title', '')}".strip(" -")
+        return Reply(f"Playing {label} from {first.get('source', 'free music')} "
+                     f"on the speaker.", intent="music.artist")
+
     if ctx.music_assistant.enabled:
         reply = await _ma_artist_reply(search_query, ctx)
         if reply is not None:
             return reply
 
-        # Free/Creative-Commons catalogues: queue real tracks on MA.
-        free_tracks = await asyncio.to_thread(_free_music_tracks, search_query, 8)
+        # Music Assistant catalog results / multi-track queue (also the Echo
+        # through Sendspin) if the direct speaker path did not work.
         if free_tracks:
             uris = [t["stream_url"] for t in free_tracks]
             if await ctx.music_assistant.queue_uris(uris):
@@ -4148,8 +4175,6 @@ async def h_music_artist(text: str, match, ctx: Context) -> Reply:
                     f"for {query} from {', '.join(sources)} on Music Assistant: "
                     f"{'; '.join(names)}.{note}",
                     intent="music.artist")
-
-        # Native playback takes over the speaker; stop MA before falling back.
         background(ctx.music_assistant.stop())
 
     # Fallback: find a real YouTube video/mix and play it on the TV.
