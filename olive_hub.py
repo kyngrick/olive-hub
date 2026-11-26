@@ -81,6 +81,8 @@ SCHEDULE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "olive_
 DELIVERY_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "olive_notifications.jsonl")
 SCHEDULER_STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "olive_scheduler_state.json")
 SCHEDULER_TICK_SECONDS = 5
+MUSIC_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "music_cache.json")
+MUSIC_CACHE_TTL = 14 * 24 * 3600
 CALENDAR_SYNC_SECONDS = 600
 BRIEFING_HOUR = 7
 
@@ -4108,27 +4110,130 @@ async def _echo_play_track(ctx: Context, track: dict[str, Any]) -> bool:
         return False
 
 
-def _free_music_tracks(query: str, limit: int = 8) -> list[dict[str, Any]]:
-    """Search the local freemusic providers (Audius, Archive, optional Jamendo)."""
+_MUSIC_CACHE: dict[str, Any] = {}
+
+
+def _music_cache_load() -> None:
+    global _MUSIC_CACHE
+    try:
+        with open(MUSIC_CACHE_FILE, encoding="utf-8-sig") as handle:
+            data = json.load(handle)
+        if isinstance(data, dict):
+            _MUSIC_CACHE = data
+    except Exception:
+        _MUSIC_CACHE = {}
+
+
+def _music_cache_save() -> None:
+    tmp = MUSIC_CACHE_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(_MUSIC_CACHE, handle, indent=2, ensure_ascii=False)
+        os.replace(tmp, MUSIC_CACHE_FILE)
+    except Exception as exc:
+        log.debug("music cache save failed: %s", exc)
+
+
+_music_cache_load()
+
+
+def _music_relevance(query: str, track: dict[str, Any]) -> int:
+    tokens = [t for t in re.findall(r"[a-z0-9]+", query.lower()) if len(t) > 2]
+    hay = " ".join(str(track.get(k) or "") for k in ("artist", "title", "genre")).lower()
+    return sum(1 for token in tokens if token in hay)
+
+
+def _music_sources(query: str, genre: str, source: str, limit: int) -> list[dict[str, Any]]:
     if freemusic is None:
         return []
-    sources = ["audius", "archive"]
-    if os.getenv("JAMENDO_CLIENT_ID"):
-        sources.insert(0, "jamendo")
-    tracks: list[dict[str, Any]] = []
-    for source in sources:
-        try:
-            result = freemusic.search(query, "", source, limit)
-            tracks.extend(t for t in result.get("results", []) if t.get("stream_url"))
-        except Exception as exc:
-            log.debug("freemusic %s failed: %s", source, exc)
-    # Rank by how well the artist/genre phrase appears in artist/title.
-    tokens = [t for t in re.findall(r"[a-z0-9]+", query.lower()) if len(t) > 2]
-    def score(track: dict[str, Any]) -> int:
-        hay = f"{track.get('artist', '')} {track.get('title', '')} {track.get('genre', '')}".lower()
-        return sum(1 for token in tokens if token in hay)
-    tracks = sorted(tracks, key=score, reverse=True)
-    return tracks[:limit]
+    try:
+        result = freemusic.search(query, genre, source, limit)
+        return list(result.get("results") or [])
+    except Exception as exc:
+        log.debug("freemusic %s failed: %s", source, exc)
+        return []
+
+
+def _free_music_tracks(query: str, limit: int = 8) -> list[dict[str, Any]]:
+    """Fast, cached, relevance-ranked free-music search.
+
+    Audius is queried first because it is fast and has real artist catalogues;
+    slower Archive/Jamendo sources are only used when Audius lacks enough
+    relevant matches. Results are persisted in music_cache.json.
+    """
+    key = re.sub(r"\s+", " ", query.strip().lower())
+    cached = _MUSIC_CACHE.get(key)
+    if isinstance(cached, dict) and time.time() - float(cached.get("at", 0)) < MUSIC_CACHE_TTL:
+        rows = [t for t in cached.get("tracks", []) if t.get("stream_url")]
+        log.info("music cache hit for %r (%d tracks)", query, len(rows))
+        return rows[:limit]
+
+    tokens = [t for t in re.findall(r"[a-z0-9]+", key) if len(t) > 2]
+    min_score = 2 if len(tokens) >= 2 else 1
+    tracks = _music_sources(query, "", "audius", limit)
+    relevant = [t for t in tracks if _music_relevance(key, t) >= min_score]
+    # A multi-word artist with no Audius match is unlikely to be rescued by
+    # slower generic archives; go straight to the genre fallback instead of
+    # making the user wait 6+ seconds for unrelated results.
+    if len(relevant) < max(2, limit // 2) and (len(tokens) == 1 or relevant):
+        extra = _music_sources(query, "", "archive", limit)
+        relevant += [t for t in extra if _music_relevance(key, t) >= min_score]
+    if len(relevant) < max(2, limit // 2) and (len(tokens) == 1 or relevant) and os.getenv("JAMENDO_CLIENT_ID"):
+        extra = _music_sources(query, "", "jamendo", limit)
+        relevant += [t for t in extra if _music_relevance(key, t) >= min_score]
+
+    seen: set[str] = set()
+    unique = []
+    for t in relevant:
+        marker = f"{t.get('source')}:{t.get('id')}"
+        if marker not in seen:
+            seen.add(marker)
+            unique.append(t)
+    unique.sort(key=lambda t: (-_music_relevance(query, t), t.get("source") != "audius"))
+    _MUSIC_CACHE[key] = {"at": time.time(), "query": query,
+                         "tracks": unique[:20]}
+    _music_cache_save()
+    log.info("music cache stored %r (%d tracks)", query, len(unique[:20]))
+    return unique[:limit]
+
+
+ARTIST_ALIASES = {
+    "budubantan": "buju banton", "budubanton": "buju banton",
+    "buju bantam": "buju banton", "buju bantan": "buju banton",
+    "steven marley": "stephen marley", "stephen marley": "stephen marley",
+    "a little wind": "lil wayne", "little wayne": "lil wayne",
+    "lil wayne": "lil wayne",
+}
+
+def _best_radio(tag: str) -> list[dict[str, Any]]:
+    """Rank Radio Browser results by actual genre match, not just popularity."""
+    stations = _music_sources("", tag, "radio", 30)
+    def score(station: dict[str, Any]) -> int:
+        name = str(station.get("title") or "").lower()
+        tags = str(station.get("genre") or "").lower()
+        value = 0
+        if tag.lower() in tags:
+            value += 4
+        if tag.lower() in name:
+            value += 3
+        if len(name) > 90:
+            value -= 3
+        if station.get("stream_url"):
+            value += 1
+        return value
+    stations.sort(key=score, reverse=True)
+    return stations[:5]
+
+
+GENRE_FALLBACK = {
+    "buju banton": "reggae", "stephen marley": "reggae", "reggae": "reggae",
+    "dancehall": "dancehall", "jamaican": "reggae",
+}
+
+
+def correct_music_query(query: str) -> str:
+    clean = re.sub(r"\s+", " ", str(query or "").strip().lower())
+    return ARTIST_ALIASES.get(clean, clean)
 
 
 async def h_music_artist(text: str, match, ctx: Context) -> Reply:
@@ -4144,7 +4249,7 @@ async def h_music_artist(text: str, match, ctx: Context) -> Reply:
         "rap": "hip hop rap", "hip hop": "hip hop rap",
         "rockers": "rock", "singers": "pop music",
     }
-    search_query = genre_map.get(query.lower(), query)
+    search_query = genre_map.get(query.lower(), correct_music_query(query))
 
     # Speaker first: search the free catalogues and hand the best match
     # directly to the Echo's native stream player.
@@ -4154,6 +4259,18 @@ async def h_music_artist(text: str, match, ctx: Context) -> Reply:
         label = f"{first.get('artist', '')} - {first.get('title', '')}".strip(" -")
         return Reply(f"Playing {label} from {first.get('source', 'free music')} "
                      f"on the speaker.", intent="music.artist")
+
+    if not free_tracks and search_query in GENRE_FALLBACK:
+        tag = GENRE_FALLBACK[search_query]
+        stations = await asyncio.to_thread(_best_radio, tag)
+        if stations:
+            station = stations[0]
+            if await _echo_play_track(ctx, {"stream_url": station.get("stream_url", ""),
+                                            "artist": tag.title(), "title": station.get("title", ""),
+                                            "source": "radio"}):
+                return Reply(f"I couldn't find that artist on the free catalogues, so I'm "
+                             f"playing {tag} radio on the speaker: {station.get('title', '')}.",
+                             intent="music.artist")
 
     if ctx.music_assistant.enabled:
         reply = await _ma_artist_reply(search_query, ctx)
@@ -4178,7 +4295,13 @@ async def h_music_artist(text: str, match, ctx: Context) -> Reply:
         background(ctx.music_assistant.stop())
 
     # Fallback: find a real YouTube video/mix and play it on the TV.
-    url, resolved = await resolve_youtube_url(ctx.http, f"{search_query} music mix")
+    try:
+        url, resolved = await asyncio.wait_for(
+            resolve_youtube_url(ctx.http, f"{search_query} music mix"), timeout=12)
+    except Exception as exc:
+        log.warning("music youtube fallback failed: %s", exc)
+        return Reply(f"Sorry, I couldn't find playable music for {query} right now. "
+                     f"The music services were slow or unavailable.", intent="music.artist")
     awake = await ctx.tv.ensure_awake()
     if awake.ok:
         result = await ctx.tv.adb_view_url(url, package="com.google.android.youtube.tv")

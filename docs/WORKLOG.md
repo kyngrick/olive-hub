@@ -43,6 +43,20 @@ restart everything.
 - REST `serve` mode tested on port 8770. Added `tests/test_freemusic.py` (pass).
 - Report: `FREEMUSIC-INTEGRATION-2026-11-26.md`. 9/9 services healthy.
 
+## 2026-11-26 18:10 — music latency/relevance fix
+
+- Root causes: Whisper misheard artist names (`budubantan`, `a little wind`);
+  every request searched slow Archive (6.3 s) and irrelevant results won; no
+  cache; YouTube fallback could hang and produce "didn't work".
+- Researched Alexa/Google patterns: pre-indexed catalogs, entity resolution +
+  ranking, ASR prefetch/semantic caches, bounded local caches, strict timeouts.
+- Implemented artist aliases, persistent `music_cache.json` (14-day TTL,
+  negative caching), Audius-first early exit, relevance thresholds, ranked
+  radio genre fallback, 12 s YouTube timeout with honest error.
+- Live results: Buju Banton 1.4 s (cache hit 0.0 s), Stephen Marley 1.8 s with
+  proper reggae radio fallback. Tests: `tests/test_music_resolver.py` PASS.
+- Report: `MUSIC-LATENCY-RESEARCH-2026-11-26.md`. 9/9 services healthy.
+
 ## 2026-11-26 16:00 — Jamendo key + Echo-first output
 
 - Added `JAMENDO_CLIENT_ID` to .env; verified Jamendo fields live. Fixed two
