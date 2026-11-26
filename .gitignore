@@ -1,6 +1,8 @@
 # Secrets and local configuration
 .env
 .env.*
+ytmusic-headers.txt
+ytmusic-auth.json
 !.env.example
 *.token
 run.cmd

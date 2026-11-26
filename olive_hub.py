@@ -65,6 +65,10 @@ try:
     import freemusic
 except Exception:  # optional local module; never break the hub on import
     freemusic = None
+try:
+    import ytmusic_source  # optional: user's own logged-in YouTube Music account
+except Exception:
+    ytmusic_source = None
 import flights_provider as flights
 import whatsapp as whatsapp_bridge
 import voice_personas as voices
@@ -4346,6 +4350,33 @@ async def h_music_artist(text: str, match, ctx: Context) -> Reply:
         "rockers": "rock", "singers": "pop music",
     }
     search_query = genre_map.get(query.lower(), correct_music_query(query))
+
+    # The user's own YouTube Music account is the first choice: real full
+    # tracks, personalised results. Only active when local auth files exist.
+    if ytmusic_source is not None and ytmusic_source.available():
+        try:
+            yt_tracks = await asyncio.wait_for(
+                asyncio.to_thread(ytmusic_source.search, search_query, 8), timeout=10)
+        except Exception as exc:
+            log.debug("ytmusic search skipped: %s", exc)
+            yt_tracks = []
+        for yt_track in yt_tracks[:3]:
+            try:
+                url = await asyncio.wait_for(
+                    asyncio.to_thread(ytmusic_source.stream_url,
+                                      yt_track.get("videoId", "")), timeout=20)
+            except Exception as exc:
+                log.debug("ytmusic stream skipped: %s", exc)
+                url = ""
+            if not url:
+                continue
+            label = f"{yt_track.get('artist', '')} - {yt_track.get('title', '')}".strip(" -")
+            if await _echo_play_track(ctx, {"stream_url": url,
+                                            "artist": yt_track.get("artist", ""),
+                                            "title": yt_track.get("title", ""),
+                                            "source": "ytmusic"}):
+                return Reply(f"Playing {label} from your YouTube Music account "
+                             f"on the speaker.", intent="music.artist")
 
     # Speaker first: search the free catalogues and hand the best match
     # directly to the Echo's native stream player.
