@@ -31,6 +31,7 @@ import logging
 import os
 import random
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -83,6 +84,8 @@ SCHEDULER_STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "oliv
 SCHEDULER_TICK_SECONDS = 5
 MUSIC_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "music_cache.json")
 MUSIC_CACHE_TTL = 14 * 24 * 3600
+MUSIC_PREFS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "music_prefs.json")
+_LAST_PREFETCH = 0.0
 CALENDAR_SYNC_SECONDS = 600
 BRIEFING_HOUR = 7
 
@@ -1980,14 +1983,40 @@ def _next_repeat(item: "ScheduleItem", now: dt.datetime) -> Optional[float]:
     return None
 
 
+def _local_lan_ip() -> str:
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(("8.8.8.8", 80))
+        ip = sock.getsockname()[0]
+        sock.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+def alert_tone_url() -> str:
+    return f"http://{_local_lan_ip()}:{os.getenv('HUB_PORT', '8765')}/alert-tone.wav"
+
+
+async def alert_tone_route(_request: web.Request) -> web.Response:
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "olive-alert.wav")
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+        return web.Response(body=data, content_type="audio/wav")
+    except Exception:
+        return web.Response(status=404)
+
+
 class Scheduler:
     """Reminders and device routines that survive a hub restart."""
 
     def __init__(self, speech: "Speech", path: str = SCHEDULE_FILE,
-                 action_fn=None) -> None:
+                 action_fn=None, alert_fn=None) -> None:
         self.speech = speech
         self.path = path
         self.action_fn = action_fn
+        self.alert_fn = alert_fn
         self.items: dict[str, ScheduleItem] = {}
         self._task: Optional[asyncio.Task] = None
         self._calendar_task: Optional[asyncio.Task] = None
@@ -2101,6 +2130,11 @@ class Scheduler:
             ok, error = True, ""
             voice = self.voice_in_use()
             try:
+                if item.kind in ("alarm", "reminder") and self.alert_fn:
+                    try:
+                        await self.alert_fn()
+                    except Exception as exc:
+                        log.debug("alert tone failed: %s", exc)
                 if item.announce:
                     prefix = "Sorry to interrupt. " if recovered else ""
                     await self.speech.say(prefix + item.announce)
@@ -4110,6 +4144,57 @@ async def _echo_play_track(ctx: Context, track: dict[str, Any]) -> bool:
         return False
 
 
+def _music_prefs_load() -> dict[str, Any]:
+    try:
+        with open(MUSIC_PREFS_FILE, encoding="utf-8-sig") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _music_prefs_save(prefs: dict[str, Any]) -> None:
+    tmp = MUSIC_PREFS_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(prefs, handle, indent=2, ensure_ascii=False)
+        os.replace(tmp, MUSIC_PREFS_FILE)
+    except Exception as exc:
+        log.debug("music prefs save failed: %s", exc)
+
+
+def note_artist(query: str) -> None:
+    """Learn which artists this user asks for, for ranking and prefetch."""
+    key = re.sub(r"\s+", " ", str(query or "").strip().lower())
+    if not key or len(key) > 60:
+        return
+    prefs = _music_prefs_load()
+    entry = prefs.get(key) or {"count": 0, "last": 0}
+    entry["count"] = int(entry.get("count", 0)) + 1
+    entry["last"] = time.time()
+    prefs[key] = entry
+    _music_prefs_save(prefs)
+
+
+async def prefetch_music_cache() -> None:
+    """Refresh this user's favourite artists when the mic opens (prefetch)."""
+    global _LAST_PREFETCH
+    now = time.monotonic()
+    if now - _LAST_PREFETCH < 600:
+        return
+    _LAST_PREFETCH = now
+    prefs = _music_prefs_load()
+    favourites = sorted(prefs, key=lambda k: int(prefs[k].get("count", 0)), reverse=True)[:3]
+    for artist in favourites:
+        cached = _MUSIC_CACHE.get(artist)
+        if isinstance(cached, dict) and time.time() - float(cached.get("at", 0)) < 3600:
+            continue
+        try:
+            await asyncio.to_thread(_free_music_tracks, artist, 8)
+        except Exception as exc:
+            log.debug("prefetch %s failed: %s", artist, exc)
+
+
 _MUSIC_CACHE: dict[str, Any] = {}
 
 
@@ -4202,6 +4287,7 @@ def _free_music_tracks(query: str, limit: int = 8) -> list[dict[str, Any]]:
                                source_rank.get(t.get("source"), 9)))
     _MUSIC_CACHE[key] = {"at": time.time(), "query": query,
                          "tracks": unique[:20]}
+    note_artist(query)
     _music_cache_save()
     log.info("music cache stored %r (%d tracks)", query, len(unique[:20]))
     return unique[:limit]
@@ -5899,7 +5985,7 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
 
     @web.middleware
     async def auth(request: web.Request, handler):
-        if settings.hub_token and request.path not in ("/health",):
+        if settings.hub_token and request.path not in ("/health", "/alert-tone.wav"):
             header = request.headers.get("X-Olive-Token") or ""
             auth = request.headers.get("Authorization") or ""
             bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
@@ -6498,6 +6584,7 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
                                   "disabled": sorted(DISABLED_INTENTS)})
 
     app.router.add_get("/health", health)
+    app.router.add_get("/alert-tone.wav", alert_tone_route)
     async def intents_reload(_request: web.Request) -> web.Response:
         """Re-read custom_intents.json and apply atomically, with rollback."""
         global CUSTOM_INTENTS, DISABLED_INTENTS
@@ -6541,13 +6628,15 @@ if WYOMING_AVAILABLE:
     class AsrProxyHandler(AsyncEventHandler):
         """Forwards audio to Whisper and returns one transcript, with a timeout."""
 
-        def __init__(self, reader, writer, settings: Settings, duck_fn=None) -> None:
+        def __init__(self, reader, writer, settings: Settings, duck_fn=None,
+                     prefetch_fn=None) -> None:
             super().__init__(reader, writer)
             self.settings = settings
             self.client: Optional[AsyncTcpClient] = None
             self.upstream_failed = False
             self.last_upstream_warning = 0.0
             self.duck_fn = duck_fn
+            self.prefetch_fn = prefetch_fn
             self.ducked = False
             log.info("ASR client connected from %s", writer.get_extra_info("peername"))
 
@@ -6584,6 +6673,10 @@ if WYOMING_AVAILABLE:
                     # if Whisper has just come back.
                     if Transcribe.is_type(event.type):
                         self.ducked = False
+                        # The speaker opened its mic: warm this user's cached
+                        # artists while the user speaks, non-blocking.
+                        if self.prefetch_fn:
+                            asyncio.create_task(self.prefetch_fn())
                     self.upstream_failed = False
                     if self.duck_fn and not self.ducked:
                         self.ducked = True
@@ -6701,7 +6794,13 @@ async def run(settings: Optional[Settings] = None) -> None:
     tv = TvControl(settings)
     memory = PermanentMemory(path=settings.memory_file, enabled=settings.memory_enabled)
     iot = IotRegistry(path=settings.iot_keys_file, enabled=settings.iot_enabled)
-    scheduler = Scheduler(speech)
+    async def play_alert_tone() -> None:
+        url = alert_tone_url()
+        await ctx_radio.add({"word": "olive-alert", "name": "Olive alert", "url": url})
+        await device.play_radio("olive-alert")
+
+    ctx_radio = RadioLibrary(device, settings, http)
+    scheduler = Scheduler(speech, alert_fn=play_alert_tone)
     ctx = Context(
         settings=settings, device=device, speech=speech, ha=ha,
         weather=weather, knowledge=knowledge, http=http, radio=radio, tuya=tuya,
@@ -6769,7 +6868,8 @@ async def run(settings: Optional[Settings] = None) -> None:
             log.info("Wyoming ASR proxy listening on %s:%s", settings.asr_host, settings.asr_port)
             asr_task = asyncio.create_task(
                 asr_server.run(lambda r, w: AsrProxyHandler(r, w, settings,
-                                                            duck_fn=duck_for_voice))
+                                                            duck_fn=duck_for_voice,
+                                                            prefetch_fn=prefetch_music_cache))
             )
         else:
             log.warning("wyoming not installed: ASR proxy disabled (pip install wyoming)")

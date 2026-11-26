@@ -15,6 +15,8 @@ iot_devices.json
 iot_pending.json
 flight_search_cache.json
 music_catalog.json
+music_cache.json
+music_prefs.json
 
 # WhatsApp bridge sessions and QR images
 whatsapp-bridge/session*/
