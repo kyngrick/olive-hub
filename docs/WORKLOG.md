@@ -31,6 +31,20 @@ restart everything.
 
 ---
 
+## 2026-11-26 09:00 — free music sources integrated and tested
+
+- Imported supplied `freemusic.py`; verified live fields for Audius, Internet
+  Archive and Radio Browser (Jamendo needs a free client ID, not available).
+- Fixed Archive duration parsing (`"04:29"` strings crashed `float()`).
+- Integrated into `music.artist`: MA catalog → free sources (Audius/Archive/
+  optional Jamendo) queued on MA → YouTube fallback.
+- Verified live: "play music by little wayne" and "play music by rappers" now
+  queue real Audius tracks on Music Assistant; MA reports playing.
+- REST `serve` mode tested on port 8770. Added `tests/test_freemusic.py` (pass).
+- Report: `FREEMUSIC-INTEGRATION-2026-11-26.md`. 9/9 services healthy.
+
+---
+
 ## 2026-11-26 08:20 — artist-based music search
 
 - Restarted Music Assistant container (HTTP endpoint had stopped responding).

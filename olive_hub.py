@@ -60,6 +60,10 @@ from extras import (ShoppingList, convert_currency as fx_convert,
                     convert_units, joke as tell_joke, quote as daily_quote)
 from web_helpers import flights_url as build_flights_url, youtube_url as resolve_youtube_url
 import train_provider
+try:
+    import freemusic
+except Exception:  # optional local module; never break the hub on import
+    freemusic = None
 import flights_provider as flights
 import whatsapp as whatsapp_bridge
 import voice_personas as voices
@@ -4086,6 +4090,29 @@ async def _ma_artist_reply(query: str, ctx: Context) -> Optional[Reply]:
                  intent="music.artist")
 
 
+def _free_music_tracks(query: str, limit: int = 8) -> list[dict[str, Any]]:
+    """Search the local freemusic providers (Audius, Archive, optional Jamendo)."""
+    if freemusic is None:
+        return []
+    sources = ["audius", "archive"]
+    if os.getenv("JAMENDO_CLIENT_ID"):
+        sources.insert(0, "jamendo")
+    tracks: list[dict[str, Any]] = []
+    for source in sources:
+        try:
+            result = freemusic.search(query, "", source, limit)
+            tracks.extend(t for t in result.get("results", []) if t.get("stream_url"))
+        except Exception as exc:
+            log.debug("freemusic %s failed: %s", source, exc)
+    # Rank by how well the artist/genre phrase appears in artist/title.
+    tokens = [t for t in re.findall(r"[a-z0-9]+", query.lower()) if len(t) > 2]
+    def score(track: dict[str, Any]) -> int:
+        hay = f"{track.get('artist', '')} {track.get('title', '')} {track.get('genre', '')}".lower()
+        return sum(1 for token in tokens if token in hay)
+    tracks = sorted(tracks, key=score, reverse=True)
+    return tracks[:limit]
+
+
 async def h_music_artist(text: str, match, ctx: Context) -> Reply:
     query = _artist_query(text)
     if not query:
@@ -4105,6 +4132,23 @@ async def h_music_artist(text: str, match, ctx: Context) -> Reply:
         reply = await _ma_artist_reply(search_query, ctx)
         if reply is not None:
             return reply
+
+        # Free/Creative-Commons catalogues: queue real tracks on MA.
+        free_tracks = await asyncio.to_thread(_free_music_tracks, search_query, 8)
+        if free_tracks:
+            uris = [t["stream_url"] for t in free_tracks]
+            if await ctx.music_assistant.queue_uris(uris):
+                names = [f"{t.get('artist', '')} - {t.get('title', '')}".strip(" -")
+                         for t in free_tracks[:3]]
+                sources = sorted({t.get("source", "") for t in free_tracks})
+                lic = next((t.get("license") for t in free_tracks if t.get("license")), "")
+                note = f" Licence: {lic}." if lic else " Check the source licence before reuse."
+                return Reply(
+                    f"Playing {len(free_tracks)} track{'s' if len(free_tracks) != 1 else ''} "
+                    f"for {query} from {', '.join(sources)} on Music Assistant: "
+                    f"{'; '.join(names)}.{note}",
+                    intent="music.artist")
+
         # Native playback takes over the speaker; stop MA before falling back.
         background(ctx.music_assistant.stop())
 
