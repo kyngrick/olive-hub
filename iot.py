@@ -281,6 +281,53 @@ class IotRegistry:
             return False
         return True
 
+    # -- colour and scenes -------------------------------------------
+    COLOURS: dict[str, tuple[float, float]] = {
+        "red": (0.0, 1.0), "orange": (0.08, 1.0), "yellow": (0.16, 1.0),
+        "green": (0.33, 1.0), "teal": (0.48, 1.0), "cyan": (0.5, 1.0),
+        "blue": (0.67, 1.0), "purple": (0.78, 1.0), "violet": (0.78, 1.0),
+        "pink": (0.9, 1.0), "magenta": (0.87, 1.0),
+        "rosso": (0.0, 1.0), "arancione": (0.08, 1.0),
+        "giallo": (0.16, 1.0), "verde": (0.33, 1.0),
+        "azzurro": (0.5, 1.0), "blu": (0.67, 1.0),
+        "viola": (0.78, 1.0), "rosa": (0.9, 1.0),
+    }
+
+    def _colour_sync(self, entry: dict[str, Any], colour: str,
+                     brightness: int = 100) -> Any:
+        device = self._device(entry)
+        key = re.sub(r"\s+", " ", str(colour or "").strip().lower())
+        if key in ("white", "warm white", "cool white", "bianco", "white light"):
+            percent = max(1, min(100, brightness))
+            bulb_brightness = int(10 + 990 * percent / 100.0)
+            return device.set_white(brightness=bulb_brightness,
+                                    colourtemp=0 if "cool" in key else 1000)
+        if key.startswith("hue:") or key.isdigit():
+            try:
+                degrees = float(key.split(":", 1)[1] if ":" in key else key)
+                return device.set_hsv((degrees % 360) / 360.0, 1.0,
+                                      max(1, min(100, brightness)) / 100.0)
+            except ValueError:
+                pass
+        hue, saturation = self.COLOURS.get(key, (0.0, 0.0))
+        return device.set_hsv(hue, saturation, max(1, min(100, brightness)) / 100.0)
+
+    async def set_colour(self, entry: dict[str, Any], colour: str,
+                         brightness: int = 100) -> bool:
+        kind = str(entry.get("kind") or "bulb").lower()
+        if kind in {"plug", "switch", "outlet", "socket"}:
+            return False
+        try:
+            result = await asyncio.to_thread(self._colour_sync, entry, colour, brightness)
+        except Exception as exc:
+            log.warning("iot colour %s failed: %s", entry.get("name") or entry.get("ip"), exc)
+            return False
+        if self._failed(result):
+            log.warning("iot colour %s: %s", entry.get("name") or entry.get("ip"),
+                        (result or {}).get("Error") if isinstance(result, dict) else result)
+            return False
+        return True
+
     # -- reporting ---------------------------------------------------
     def describe(self) -> str:
         if not self.devices:

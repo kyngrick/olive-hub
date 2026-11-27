@@ -2175,7 +2175,7 @@ class Scheduler:
                 item.delivery_error = error
             self.log_delivery(item, ok, voice, error)
             self.items.pop(item.id, None)
-            if ok and item.repeat and item.kind in ("reminder", "alarm"):
+            if ok and item.repeat and item.kind in ("reminder", "alarm", "routine"):
                 next_due = _next_repeat(item, dt.datetime.now(LOCAL_TZ))
                 if next_due is not None:
                     item.due_at = next_due
@@ -3071,6 +3071,7 @@ async def stop_everything(ctx: Context) -> Optional[str]:
     can treat a bare "stop" as "end the conversation" instead.
     """
     stop_yt_autoplay()  # otherwise the queue treats this as "track ended"
+    stop_party_mode(ctx)
     if await ringing_timers(ctx):
         try:
             await ctx.device.dismiss_timers()
@@ -3186,6 +3187,141 @@ async def h_light_brightness(text: str, match, ctx: Context) -> Reply:
     if await ctx.iot.set_brightness(device, percent):
         return Reply(f"Setting {name} to {percent} percent.", intent="iot.brightness")
     return Reply(f"I couldn't reach {name} on the local network.", intent="iot.brightness")
+
+
+# Party mode cycles the bulbs through colours until stopped.
+_PARTY_TASK: Optional[asyncio.Task] = None
+_PARTY_ACTIVE = False
+_PARTY_PALETTE = ("red", "yellow", "green", "cyan", "blue", "purple", "pink")
+
+
+async def _party_worker(ctx: Context) -> None:
+    global _PARTY_ACTIVE
+    index = 0
+    while _PARTY_ACTIVE and ctx.iot.ready:
+        colour = _PARTY_PALETTE[index % len(_PARTY_PALETTE)]
+        for entry in list(ctx.iot.ready):
+            await ctx.iot.set_colour(entry, colour, 100)
+        index += 1
+        await asyncio.sleep(2.5)
+
+
+def stop_party_mode(ctx: Optional[Context] = None) -> None:
+    global _PARTY_ACTIVE, _PARTY_TASK
+    if not _PARTY_ACTIVE:
+        return
+    _PARTY_ACTIVE = False
+    if _PARTY_TASK is not None:
+        _PARTY_TASK.cancel()
+        _PARTY_TASK = None
+    if ctx is not None:
+        background(_restore_lights(ctx))
+
+
+async def _restore_lights(ctx: Context) -> None:
+    for entry in list(ctx.iot.ready):
+        await ctx.iot.set_colour(entry, "white", 100)
+
+
+async def h_light_color(text: str, match, ctx: Context) -> Reply:
+    if not (ctx.iot.enabled and ctx.iot.ready):
+        return Reply("I don't have any local lights configured yet.", intent="light.color")
+    target = (match.groupdict().get("target") or "").strip() if match else ""
+    device = ctx.iot.resolve(target) if target else None
+    if target and not device:
+        return Reply(f"I couldn't find {target or 'that light'}.", intent="light.color")
+    devices = [device] if device else list(ctx.iot.ready)
+    low = text.lower()
+    colour = ""
+    for name in sorted(ctx.iot.COLOURS, key=len, reverse=True):
+        if re.search(r"\b" + re.escape(name) + r"\b", low):
+            colour = name
+            break
+    if not colour:
+        return Reply("Tell me a colour, like red, blue, green or purple.",
+                     intent="light.color")
+    changed = 0
+    for bulb in devices:
+        if await ctx.iot.set_colour(bulb, colour):
+            changed += 1
+    return Reply(f"Set {changed} light{'s' if changed != 1 else ''} to {colour}.",
+                 intent="light.color")
+
+
+async def h_movie_mode(text: str, match, ctx: Context) -> Reply:
+    if not (ctx.iot.enabled and ctx.iot.ready):
+        return Reply("I don't have any local lights configured yet.", intent="movie.mode")
+    stop_party_mode(ctx)
+    reply = await apply_device_action(ctx, "white" if re.search(
+        r"\b(?:off|exit|cancel|end|disable)\b", text.lower()) else "movie")
+    if re.search(r"\b(?:off|exit|cancel|end|disable)\b", text.lower()):
+        reply.text = "Movie mode off. Lights restored."
+    return reply
+
+
+async def h_party_mode(text: str, match, ctx: Context) -> Reply:
+    global _PARTY_ACTIVE, _PARTY_TASK
+    if not (ctx.iot.enabled and ctx.iot.ready):
+        return Reply("I don't have any local lights configured yet.", intent="party.mode")
+    if re.search(r"\b(?:stop|off|end|cancel|disable)\b", text.lower()):
+        stop_party_mode(ctx)
+        return Reply("Party mode off. Lights restored.", intent="party.mode")
+    stop_party_mode(ctx)
+    _PARTY_ACTIVE = True
+    _PARTY_TASK = asyncio.create_task(_party_worker(ctx))
+    return Reply("Party mode on. Say stop party mode to end it.", intent="party.mode")
+
+
+async def h_routine_at(text: str, match, ctx: Context) -> Reply:
+    """Schedule a device action at a spoken time, optionally recurring."""
+    low = text.lower()
+    if re.search(r"\b(?:sunset|tramonto)\b", low):
+        sunset = await ctx.weather.sunset()
+        if sunset is None:
+            return Reply("I can't get sunset times right now.", intent="routine.at")
+        when = sunset - dt.timedelta(seconds=parse_duration(text) or 0)
+    else:
+        when = parse_when(text)
+    if when is None:
+        return Reply("What time should I do that?", intent="routine.at")
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=LOCAL_TZ)
+    repeat, _, _, _ = _parse_recurrence(text)
+    # Work out the action before stripping time words.
+    if re.search(r"\bmovie\b|\bcinema\b|\bfilm\b", low):
+        action, label = "movie", "start movie mode"
+    elif any(re.search(r"\b" + re.escape(name) + r"\b", low) for name in ctx.iot.COLOURS):
+        colour = next(name for name in sorted(ctx.iot.COLOURS, key=len, reverse=True)
+                      if re.search(r"\b" + re.escape(name) + r"\b", low))
+        action, label = f"color:{colour}", f"set the lights to {colour}"
+    elif (percent := re.search(r"\b(?:to|at)\s+(\d{1,3})\s*(?:%|percent|per cent)\b", low)):
+        action = f"brightness:{percent.group(1)}"
+        label = f"set the lights to {percent.group(1)} percent"
+    elif re.search(r"\bdim\b|\blower\b|\babassa\b", low) or \
+            re.search(r"\bto\s+10\b|\bto\s+20\b", low):
+        action, label = "brightness:15", "dim the lights"
+    elif re.search(r"\b(?:turn|switch)\s+off\b|\boff\b|\bspegni\b", low):
+        action, label = "off", "turn the lights off"
+    elif re.search(r"\b(?:turn|switch)\s+on\b|\bon\b|\baccendi\b", low):
+        action, label = "on", "turn the lights on"
+    else:
+        return Reply("I didn't understand which light action to schedule.",
+                     intent="routine.at")
+    target = ""
+    for entry in ctx.iot.ready:
+        name = str(entry.get("name") or "")
+        if name and name.lower() in low:
+            target = name
+            break
+    if not target:
+        target = ""
+    await ctx.scheduler.add(
+        "routine", when.timestamp(), f"{label} at {when:%H:%M}", "",
+        action=action, target=target, repeat=repeat,
+        repeat_hour=when.hour, repeat_minute=when.minute)
+    suffix = " every day" if repeat == "daily" else ""
+    pretty = when.strftime("%H:%M")
+    return Reply(f"Okay, I'll {label} at {pretty}{suffix}.", intent="routine.at")
 
 
 async def h_ha_state(text: str, match, ctx: Context) -> Reply:
@@ -3375,12 +3511,21 @@ async def h_alarm_set(text: str, match, ctx: Context) -> Reply:
     if wait <= 0:
         wait += 86400
     label = f"alarm {target:%Y-%m-%d %H:%M}"
+    music_match = re.search(
+        r"\b(?:with|and|then|plus|play)\s+(?:some\s+|a\s+bit\s+of\s+)?"
+        r"(.+?\b(?:music|songs?|mix|tracks?)\b)", text, re.IGNORECASE)
+    music_query = ""
+    if music_match:
+        music_query = re.sub(r"^\s*(?:play|some|a bit of)\s+", "",
+                             music_match.group(1), flags=re.IGNORECASE).strip(" ,.")
     # Alarms are their own typed scheduled entity. They never become device timers.
-    await ctx.scheduler.add("alarm", target.timestamp(), label,
-                            f"Good morning. It is {target:%H:%M}. Your alarm is going off.",
-                            source="voice")
+    await ctx.scheduler.add(
+        "alarm", target.timestamp(), label,
+        f"Good morning. It is {target:%H:%M}. Your alarm is going off.",
+        action="music" if music_query else "", target=music_query, source="voice")
     pretty = target.strftime("%H:%M") if target.date() == dt.date.today() else target.strftime("%A %H:%M")
-    return Reply(f"Alarm set for {pretty}.", intent="alarm.set")
+    suffix = f" with {music_query}" if music_query else ""
+    return Reply(f"Alarm set for {pretty}{suffix}.", intent="alarm.set")
 
 
 def _reminder_what(text: str) -> str:
@@ -3472,12 +3617,15 @@ async def h_routine_sunset(text: str, match, ctx: Context) -> Reply:
     due = sunset - dt.timedelta(seconds=seconds)
     if due.timestamp() <= time.time():
         return Reply("That sunset time has already passed.", intent="routine.sunset")
+    turn_off = bool(re.search(r"\b(?:off|spegni)\b", text.lower()))
+    action = "off" if turn_off else "on"
     await ctx.scheduler.add(
-        "routine", due.timestamp(), f"{name} on before sunset", "",
-        action="on", target=name,
+        "routine", due.timestamp(), f"{name} {action} before sunset", "",
+        action=action, target=name,
     )
     when = due.strftime("%H:%M") if due.date() == dt.date.today() else due.strftime("%A %H:%M")
-    return Reply(f"Okay, I'll turn on {name} at {when}, "
+    verb = "off" if turn_off else "on"
+    return Reply(f"Okay, I'll turn {verb} {name} at {when}, "
                  f"{pretty_duration(seconds)} before sunset.", intent="routine.sunset")
 
 
@@ -4281,6 +4429,89 @@ async def _play_yt_tracks(ctx: "Context", tracks: list[dict[str, Any]], *,
             return Reply(f"{prefix}Playing {label} from your YouTube Music account "
                          f"on the speaker.", intent=intent)
     return None
+
+
+async def apply_device_action(ctx: "Context", action: str,
+                              target: str = "") -> Reply:
+    """Run a persisted routine action on the local IoT devices."""
+    action = str(action or "").strip()
+    devices: list[dict[str, Any]] = []
+    if ctx.iot and ctx.iot.enabled and ctx.iot.ready:
+        if target:
+            device = ctx.iot.resolve(target)
+            if device:
+                devices = [device]
+        else:
+            devices = list(ctx.iot.ready)
+    if not devices:
+        return Reply(f"Couldn't find a device for {target or 'the lights'}.",
+                     intent="routine")
+    if action in ("on", "off"):
+        on = action == "on"
+        changed = 0
+        for device in devices:
+            if await ctx.iot.set_power(device, on):
+                changed += 1
+        verb = "on" if on else "off"
+        return Reply(f"Turned {verb} {changed} device{'s' if changed != 1 else ''}.",
+                     intent="routine")
+    if action.startswith("brightness:"):
+        try:
+            percent = max(1, min(100, int(action.split(":", 1)[1])))
+        except (ValueError, IndexError):
+            percent = 20
+        changed = 0
+        for device in devices:
+            if await ctx.iot.set_brightness(device, percent):
+                changed += 1
+        return Reply(f"Set {changed} light{'s' if changed != 1 else ''} to {percent} percent.",
+                     intent="routine")
+    if action.startswith("color:") or action.startswith("colour:"):
+        colour = action.split(":", 1)[1]
+        changed = 0
+        for device in devices:
+            if await ctx.iot.set_colour(device, colour):
+                changed += 1
+        return Reply(f"Set {changed} light{'s' if changed != 1 else ''} to {colour}.",
+                     intent="routine")
+    if action == "movie":
+        changed = 0
+        for device in devices:
+            if await ctx.iot.set_colour(device, "white", 10):
+                changed += 1
+        return Reply(f"Movie mode: dimmed {changed} light{'s' if changed != 1 else ''}.",
+                     intent="routine")
+    if action == "white":
+        changed = 0
+        for device in devices:
+            if await ctx.iot.set_colour(device, "white", 100):
+                changed += 1
+        return Reply(f"Restored {changed} light{'s' if changed != 1 else ''} to full white.",
+                     intent="routine")
+    return Reply(f"Unknown scheduled action {action}.", intent="routine")
+
+
+async def play_scheduled_music(ctx: "Context", query: str) -> None:
+    """Play music as part of an alarm or scheduled routine (no autoplay)."""
+    if ytmusic_source is None or not ytmusic_source.available():
+        log.warning("scheduled music skipped: YouTube Music is not configured")
+        return
+    mood = ytmusic_source.resolve_mood(query)
+    rows: list[dict[str, Any]] = []
+    try:
+        if mood:
+            playlists = await asyncio.to_thread(ytmusic_source.mood_playlists, mood, 2)
+            for playlist in playlists[:1]:
+                rows.extend(await asyncio.to_thread(
+                    ytmusic_source.playlist_tracks, playlist["playlistId"], 10))
+        if not rows:
+            rows = await asyncio.to_thread(ytmusic_source.search, query, 10)
+    except Exception as exc:
+        log.debug("scheduled music search failed: %s", exc)
+    if rows:
+        await _play_yt_tracks(ctx, rows, announce=f"Good morning, here's your "
+                              f"{mood or query} music", intent="alarm.music",
+                              autoplay=False)
 
 
 def _music_prefs_load() -> dict[str, Any]:
@@ -5609,6 +5840,29 @@ INTENTS: list[Intent] = [
         r"\bsystem\s+diagnostics\b",
         r"\brun\s+(?:system\s+)?diagnostics\b",
     ), h_system_diagnostics),
+    Intent("routine.at", compile_all(
+        r"\b(?:turn|switch)\s+(?:on|off)\b.*\bat\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b",
+        r"\b(?:lights?|lamps?)\s+(?:on|off|dim|to\s+\d+)\s+at\s+\d{1,2}",
+        r"\b(?:set|schedule)\b.*\b(?:lights?|lamps?|movie|party)\b.*\bat\s+\d{1,2}",
+        r"\b(?:accendi|spegni)\b.*\balle\s+\d{1,2}",
+        r"\bevery\s+day\b.*\b(?:lights?|lamps?)\b",
+        r"\b(?:at|before|around)\s+(?:the\s+)?sunset\b",
+        r"\b(?:al|prima\s+del)\s+tramonto\b",
+    ), h_routine_at),
+    Intent("movie.mode", compile_all(
+        r"\b(?:movie|cinema|film)\s+mode\b",
+        r"\b(?:dim|lower)\s+(?:the\s+)?lights?\s+for\s+(?:a\s+)?movie\b",
+        r"\bmodalit[aà]\s+cinema\b",
+    ), h_movie_mode),
+    Intent("party.mode", compile_all(
+        r"\bparty\s+(?:mode|lights?)\b",
+        r"\b(?:start|turn\s+on)\s+the\s+party\b",
+        r"\bfesta\b",
+    ), h_party_mode),
+    Intent("light.color", compile_all(
+        r"\b(?:set|turn|change|make)\b.*\b(?:light|lights|lamp|lamps)\b.*\b(?:red|blue|green|yellow|purple|violet|pink|orange|cyan|teal|white|warm white|cool white|rosso|blu|verde|giallo|viola|rosa|azzurro|bianco)\b",
+        r"\b(?:light|lights|lamp|lamps)\b.*\b(?:to|colore?)\s+(?:red|blue|green|yellow|purple|pink|orange|cyan|white|rosso|blu|verde|giallo|viola|rosa|bianco)\b",
+    ), h_light_color),
     Intent("light.toggle", compile_all(
         r"\b(?:turn|switch)\s+(?:on|off)\s+(?:the\s+)?(?:light|lights|lamp|lamps)\b",
         r"\b(?:accendi|spegni)\s+(?:la\s+|le\s+)?(?:luce|luci|lampada|lampade)\b",
@@ -6392,7 +6646,8 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
     LISTENING_LINE = "I'm listening."
     MEDIA_INTENTS = {"radio", "music.mood", "music.stop", "music.pause", "music.resume",
                      "music.status", "music.playlist", "music.next", "music.artist",
-                     "music.trending", "music.new", "music.similar"}
+                     "music.trending", "music.new", "music.similar",
+                     "movie.mode", "party.mode"}
     chat_lock = asyncio.Lock()
 
     def chat_payload(model: str, content: str) -> dict[str, Any]:
@@ -7086,8 +7341,14 @@ async def run(settings: Optional[Settings] = None) -> None:
     async def run_scheduled_action(item: "ScheduleItem") -> None:
         if not item.action:
             return
-        reply = await home_toggle(ctx, item.target, item.action == "on")
-        log.info("scheduled action %s (%s): %s", item.id, item.action, reply.text)
+        action = str(item.action)
+        if action == "music" or action.startswith("music:"):
+            query = item.target or (action.split(":", 1)[1] if ":" in action else "happy music")
+            await play_scheduled_music(ctx, query)
+            log.info("scheduled action %s (%s): music for %r", item.id, action, query)
+            return
+        reply = await apply_device_action(ctx, action, item.target)
+        log.info("scheduled action %s (%s): %s", item.id, action, reply.text)
 
     scheduler.action_fn = run_scheduled_action
 
