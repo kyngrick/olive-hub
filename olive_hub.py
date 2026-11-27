@@ -3893,6 +3893,45 @@ async def h_news(text: str, match, ctx: Context) -> Reply:
     return Reply(summary or "I couldn't find any news just now.", intent="news")
 
 
+async def h_news_play(text: str, match, ctx: Context) -> Reply:
+    """Play a live news stream on the TV instead of only reading a summary."""
+    low = normalise(text)
+    if re.search(r"\b(?:rai|italy|italian|tg)\b", low):
+        source, query = "Rai News 24", "Rai News 24 live"
+    elif re.search(r"\bcnn\b", low):
+        source, query = "CNN", "CNN live news"
+    elif re.search(r"\bcbs\b", low):
+        source, query = "CBS News", "CBS News live"
+    elif re.search(r"\bbbc\b", low):
+        source, query = "BBC News", "BBC News live"
+    elif re.search(r"\bfox\b", low):
+        source, query = "Fox News", "Fox News live"
+    else:
+        source, query = "the news", "latest news live"
+
+    try:
+        url, resolved = await asyncio.wait_for(
+            resolve_youtube_url(ctx.http, query), timeout=15)
+    except Exception as exc:
+        log.debug("news video lookup failed: %s", exc)
+        return Reply("I couldn't look up a news stream right now.", intent="news.play")
+
+    awake = await ctx.tv.ensure_awake()
+    if not awake.ok:
+        log.warning("news: TV unavailable: %s", awake.message)
+        background(asyncio.to_thread(webbrowser.open, url))
+        return Reply(f"I couldn't wake the TV ({awake.message}). "
+                     f"I opened the news on the computer instead.", intent="news.play")
+    result = await ctx.tv.adb_view_url(url, package="com.google.android.youtube.tv")
+    if not result.ok:
+        background(asyncio.to_thread(webbrowser.open, url))
+        return Reply("The TV didn't answer, so I opened the news on the computer.",
+                     intent="news.play")
+    label = source if resolved else f"a YouTube search for {query}"
+    prefix = "Waking the TV. " if not awake.message.startswith("TV is on") else ""
+    return Reply(f"{prefix}Playing {label} on the TV.", intent="news.play")
+
+
 async def h_calendar(text: str, match, ctx: Context) -> Reply:
     summary = await get_today_events(ctx.http)
     if not summary:
@@ -6056,6 +6095,11 @@ INTENTS: list[Intent] = [
         ),
         h_music_mood,
     ),
+    Intent("news.play", compile_all(
+        r"\b(?:play|put on|watch|turn on|show me|open)\b.*\bnews\b",
+        r"\bplay\b.*\b(?:cnn|cbs|bbc|fox|rai\s+news|rai\s+news\s+24)\b",
+        r"\b(?:metti|riproduci|accendi)\b.*\b(?:notizie|tg)\b",
+    ), h_news_play),
     Intent(
         "news",
         compile_all(
@@ -6982,7 +7026,7 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
                      "music.status", "music.playlist", "music.next", "music.artist",
                      "music.trending", "music.new", "music.similar",
                      "movie.mode", "party.mode", "sleep.mode",
-                     "music.liked", "music.taste"}
+                     "music.liked", "music.taste", "news.play"}
     chat_lock = asyncio.Lock()
 
     def chat_payload(model: str, content: str) -> dict[str, Any]:

@@ -608,6 +608,33 @@ class TvControl:
             return ""
         return str(data.get(host) or "").lower()
 
+    @staticmethod
+    def _lan_ip_for(host: str) -> str:
+        """Local IP on the same network as the TV (the PC has several NICs)."""
+        try:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            probe.connect((host, 9))  # no packets are sent
+            address = probe.getsockname()[0]
+            probe.close()
+            return str(address)
+        except Exception:
+            return ""
+
+    @staticmethod
+    async def _port_open(host: str, port: int = 5555, timeout: float = 0.6) -> bool:
+        """Fast check for a sleeping TV, without adb's long retry chain."""
+        def check() -> bool:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            try:
+                sock.connect((host, port))
+                return True
+            except Exception:
+                return False
+            finally:
+                sock.close()
+        return await asyncio.to_thread(check)
+
     async def wake_on_lan(self) -> TvResult:
         """Send a magic packet. Needs TV_MAC or a previously learned MAC."""
         host = await self._adb_host_for_cast()
@@ -616,22 +643,31 @@ class TvControl:
             return TvResult(False, "I don't know the TV's MAC address. Turn the TV on once "
                                    "and I can learn it, or set TV_MAC in .env.")
         packet = b"\xff" * 6 + bytes.fromhex(mac.replace(":", "")) * 16
-        sent = False
-        targets = ["255.255.255.255"]
+        local_ip = self._lan_ip_for(host) if host else ""
+        # Bind to the LAN adapter: this PC also has VirtualBox and WSL NICs,
+        # and an unbound limited broadcast can leave the wrong one.
+        targets: list[tuple[str, int]] = []
         if host:
-            targets.append(host)
-        for target in targets:
+            targets.extend([(host, 9), (host, 7)])
+            parts = local_ip.split(".")
+            if len(parts) == 4:
+                targets.append((".".join(parts[:3] + ["255"]), 9))
+        targets.extend([("255.255.255.255", 9), ("255.255.255.255", 7)])
+        sent = False
+        for target, port in targets:
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-                sock.sendto(packet, (target, 9))
+                if local_ip:
+                    sock.bind((local_ip, 0))
+                sock.sendto(packet, (target, port))
                 sock.close()
                 sent = True
             except Exception as exc:
-                log.debug("WoL send to %s failed: %s", target, exc)
+                log.debug("WoL send to %s:%s failed: %s", target, port, exc)
         if not sent:
             return TvResult(False, "I couldn't send the wake packet.")
-        log.info("tv: sent Wake-on-LAN for %s", mac)
+        log.info("tv: sent Wake-on-LAN for %s via %s", mac, local_ip or "default")
         return TvResult(True, f"Sent a wake signal to the TV ({mac}).")
 
     async def _wait_awake(self, seconds: float = 25.0) -> bool:
@@ -639,9 +675,10 @@ class TvControl:
         host = await self._adb_host_for_cast()
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
-            code, out = await self._adb("get-state", host=host, timeout=5)
-            if code == 0 and out.strip().splitlines()[-1].startswith("device"):
-                return True
+            if host and await self._port_open(host):
+                ok, _problem = await self._adb_connect(host)
+                if ok:
+                    return True
             await asyncio.sleep(2)
         return False
 
@@ -666,19 +703,26 @@ class TvControl:
 
     async def power_on(self) -> TvResult:
         host = await self._adb_host_for_cast()
-        if host:
+        if host and await self._port_open(host):
             ok, _problem = await self._adb_connect(host)
             if ok:
-                code, _out = await self._adb("shell", "input", "keyevent",
-                                             str(KEYCODES["wake"]), host=host)
-                if code == 0:
-                    return TvResult(True, "Turned on the TV.")
-                # Some boxes ignore WAKE; POWER toggles.
-                code, _out = await self._adb("shell", "input", "keyevent",
-                                             str(KEYCODES["power"]), host=host)
-                if code == 0:
-                    return TvResult(True, "Turned on the TV.")
-        return await self.ensure_awake()
+                for key in ("wake", "power"):
+                    code, _out = await self._adb("shell", "input", "keyevent",
+                                                 str(KEYCODES[key]), host=host)
+                    if code == 0:
+                        return TvResult(True, "Turned on the TV.")
+        # No ADB port: the TV is in standby. WoL must be sent from the LAN
+        # interface, then we wait for ADB to come back before reporting success.
+        wol = await self.wake_on_lan()
+        if wol.ok and await self._wait_awake():
+            return TvResult(True, "Turned on the TV with Wake-on-LAN.")
+        result = await self.ensure_awake()
+        if result.ok:
+            return result
+        if wol.ok:
+            return TvResult(False, "I sent the wake signal but the TV didn't come online. "
+                                   "Some TVs only accept Wake-on-LAN over Ethernet.")
+        return result
 
     async def power_off(self) -> TvResult:
         host = await self._adb_host_for_cast()
