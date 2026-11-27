@@ -2033,6 +2033,42 @@ async def yt_proxy_route(request: web.Request) -> web.Response:
                         headers={"Accept-Ranges": "bytes"})
 
 
+# 8 Hz binaural-style sleep tone, generated on demand. A real binaural beat
+# needs stereo headphones; on a single speaker this is an 8 Hz pulse.
+def _binaural_mp3(seconds: int) -> bytes:
+    """Generate an 8 Hz binaural-style MP3 with the bundled ffmpeg binary."""
+    import math
+    import struct
+    import subprocess
+    import imageio_ffmpeg
+
+    rate = 8000
+    one_second = bytearray()
+    for index in range(rate):
+        t = index / rate
+        left = int(9000 * math.sin(2 * math.pi * 200.0 * t))
+        right = int(9000 * math.sin(2 * math.pi * 208.0 * t))
+        one_second.extend(struct.pack("<hh", left, right))
+    command = [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-f", "s16le",
+               "-ar", str(rate), "-ac", "2", "-i", "pipe:0",
+               "-codec:a", "libmp3lame", "-b:a", "64k", "-f", "mp3", "-"]
+    result = subprocess.run(command, input=bytes(one_second) * seconds,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            timeout=300)
+    return result.stdout
+
+
+async def binaural_route(request: web.Request) -> web.Response:
+    try:
+        seconds = int(request.query.get("seconds", "2700"))
+    except (TypeError, ValueError):
+        seconds = 2700
+    seconds = max(30, min(2700, seconds))
+    data = await asyncio.to_thread(_binaural_mp3, seconds)
+    return web.Response(body=data, content_type="audio/mpeg",
+                        headers={"Accept-Ranges": "bytes"})
+
+
 class Scheduler:
     """Reminders and device routines that survive a hub restart."""
 
@@ -3272,6 +3308,84 @@ async def h_party_mode(text: str, match, ctx: Context) -> Reply:
     return Reply("Party mode on. Say stop party mode to end it.", intent="party.mode")
 
 
+async def h_sleep_mode(text: str, match, ctx: Context) -> Reply:
+    """TV off, lights dim then off, timed music, and a wake-up music window."""
+    low = str(text or "").lower()
+    light_hit = re.search(r"lights?\s+off\s+in\s+(\d+)\s*(?:minutes?|mins?)", low)
+    light_mins = int(light_hit.group(1)) if light_hit else 8
+    music_hit = re.search(r"(?:music|beats?|tones?)\s+for\s+(\d+)\s*(?:minutes?|mins?)", low)
+    if not music_hit:
+        music_hit = re.search(r"\bfor\s+(\d+)\s*(?:minutes?|mins?)\b", low)
+    music_mins = int(music_hit.group(1)) if music_hit else 45
+    wake_hit = re.search(r"at\s+(\d{1,2})(?::(\d{2}))?", low)
+    wake_hour, wake_minute = (int(wake_hit.group(1)), int(wake_hit.group(2) or 0)) \
+        if wake_hit else (5, 13)
+    wake_hit = re.search(r"(\d+)\s*(?:minutes?|mins?)\s+then\s+off", low)
+    wake_mins = int(wake_hit.group(1)) if wake_hit else 16
+
+    now = time.time()
+    tv_off = False
+    try:
+        result = await ctx.tv.power_off()
+        tv_off = bool(getattr(result, "ok", True))
+    except Exception as exc:
+        log.debug("sleep mode TV off failed: %s", exc)
+
+    await apply_device_action(ctx, "brightness:15")
+    await ctx.scheduler.add(
+        "routine", now + light_mins * 60, "sleep lights off", "",
+        action="off")
+    await ctx.device.set_volume(5)
+
+    binaural = bool(re.search(r"binaural|8\s*hz", low))
+    if binaural and ctx.radio is not None:
+        url = (f"http://{_local_lan_ip()}:{os.getenv('HUB_PORT', '8765')}"
+               f"/binaural.mp3?seconds={music_mins * 60}")
+        await ctx.radio.add({"word": "sleep-beats", "name": "8Hz sleep beats",
+                             "url": url})
+        await ctx.device.play_radio("sleep-beats")
+        music_note = "8 Hz binaural-style beats"
+    else:
+        rows: list[dict[str, Any]] = []
+        if ytmusic_source is not None and ytmusic_source.available():
+            try:
+                playlists = await asyncio.to_thread(
+                    ytmusic_source.mood_playlists, "Sleep", 2)
+                for playlist in playlists[:1]:
+                    rows.extend(await asyncio.to_thread(
+                        ytmusic_source.playlist_tracks, playlist["playlistId"], 12))
+            except Exception as exc:
+                log.debug("sleep mood failed: %s", exc)
+        await _play_yt_tracks(ctx, rows, announce="Sleep music",
+                              intent="sleep.mode", autoplay=True)
+        music_note = "sleep music"
+
+    stop_at = now + music_mins * 60
+    await ctx.scheduler.add("routine", stop_at, "sleep music off", "",
+                            action="music.stop")
+    await ctx.scheduler.add("routine", stop_at + 2, "sleep volume restore", "",
+                            action="volume:10")
+
+    wake = dt.datetime.now(LOCAL_TZ).replace(
+        hour=wake_hour, minute=wake_minute, second=0, microsecond=0)
+    if wake.timestamp() <= now:
+        wake += dt.timedelta(days=1)
+    target = "lucid dreaming music" if "lucid" in low else "flute music"
+    await ctx.scheduler.add("routine", wake.timestamp(), "sleep wake music", "",
+                            action="music", target=target)
+    await ctx.scheduler.add("routine", wake.timestamp() + wake_mins * 60,
+                            "wake music off", "", action="music.stop")
+
+    def mins(value: int) -> str:
+        return f"{value} minute{'s' if value != 1 else ''}"
+
+    return Reply(
+        f"Sleep mode on. TV {'off' if tv_off else 'left as it was'}, lights dim "
+        f"then off in {mins(light_mins)}, {music_note} for {mins(music_mins)}, "
+        f"and {target} at {wake:%H:%M} for {mins(wake_mins)}.",
+        intent="sleep.mode")
+
+
 async def h_routine_at(text: str, match, ctx: Context) -> Reply:
     """Schedule a device action at a spoken time, optionally recurring."""
     low = text.lower()
@@ -4435,6 +4549,19 @@ async def apply_device_action(ctx: "Context", action: str,
                               target: str = "") -> Reply:
     """Run a persisted routine action on the local IoT devices."""
     action = str(action or "").strip()
+    if action == "music.stop":
+        stop_yt_autoplay()
+        stop_party_mode(ctx)
+        with contextlib.suppress(Exception):
+            await ctx.device.stop_radio()
+        return Reply("Music stopped.", intent="routine")
+    if action.startswith("volume:"):
+        try:
+            level = max(0, min(100, int(action.split(":", 1)[1])))
+        except (ValueError, IndexError):
+            level = 10
+        await ctx.device.set_volume(level)
+        return Reply(f"Volume set to {level}.", intent="routine")
     devices: list[dict[str, Any]] = []
     if ctx.iot and ctx.iot.enabled and ctx.iot.ready:
         if target:
@@ -5840,6 +5967,11 @@ INTENTS: list[Intent] = [
         r"\bsystem\s+diagnostics\b",
         r"\brun\s+(?:system\s+)?diagnostics\b",
     ), h_system_diagnostics),
+    Intent("sleep.mode", compile_all(
+        r"\bsleep\s+mode\b",
+        r"\b(?:go|get)\s+to\s+sleep\b",
+        r"\bbinaural\b.*\b(?:sleep|beats?|tones?)\b",
+    ), h_sleep_mode),
     Intent("routine.at", compile_all(
         r"\b(?:turn|switch)\s+(?:on|off)\b.*\bat\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b",
         r"\b(?:lights?|lamps?)\s+(?:on|off|dim|to\s+\d+)\s+at\s+\d{1,2}",
@@ -6505,7 +6637,7 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
     @web.middleware
     async def auth(request: web.Request, handler):
         if (settings.hub_token
-                and request.path not in ("/health", "/alert-tone.wav")
+                and request.path not in ("/health", "/alert-tone.wav", "/binaural.mp3")
                 and not request.path.startswith("/yt/")):
             header = request.headers.get("X-Olive-Token") or ""
             auth = request.headers.get("Authorization") or ""
@@ -6647,7 +6779,7 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
     MEDIA_INTENTS = {"radio", "music.mood", "music.stop", "music.pause", "music.resume",
                      "music.status", "music.playlist", "music.next", "music.artist",
                      "music.trending", "music.new", "music.similar",
-                     "movie.mode", "party.mode"}
+                     "movie.mode", "party.mode", "sleep.mode"}
     chat_lock = asyncio.Lock()
 
     def chat_payload(model: str, content: str) -> dict[str, Any]:
@@ -7108,6 +7240,7 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
 
     app.router.add_get("/health", health)
     app.router.add_get("/alert-tone.wav", alert_tone_route)
+    app.router.add_get("/binaural.mp3", binaural_route)
     app.router.add_get("/yt/{token}", yt_proxy_route)
     async def intents_reload(_request: web.Request) -> web.Response:
         """Re-read custom_intents.json and apply atomically, with rollback."""
