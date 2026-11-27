@@ -23,6 +23,7 @@ AUTH_FILE = os.path.join(ROOT, "ytmusic-auth.json")
 
 _client: Any = None
 _init_tried = False
+_TASTE: list[str] | None = None
 
 
 def _normalise_headers(raw: str) -> str:
@@ -129,7 +130,7 @@ def search(query: str, limit: int = 8) -> list[dict[str, Any]]:
             "album": str(album.get("name") or "") if isinstance(album, dict) else "",
             "duration": str(row.get("duration") or ""),
         })
-    return out
+    return rank_by_taste(out)[:limit]
 
 
 def _http_headers() -> dict[str, str]:
@@ -140,6 +141,64 @@ def _http_headers() -> dict[str, str]:
         return {}
     keys = ("cookie", "user-agent", "x-goog-visitor-id")
     return {k: str(data[k]) for k in keys if data.get(k)}
+
+
+def taste_artists() -> list[str]:
+    """The user's real YouTube Music taste profile (artists they follow)."""
+    global _TASTE
+    if _TASTE is None:
+        yt = client()
+        if yt is None:
+            return []
+        try:
+            data = yt.get_tasteprofile() or {}
+            _TASTE = [str(name).lower() for name in data if isinstance(name, str)]
+        except Exception as exc:
+            log.warning("ytmusic: taste profile failed (%s)", exc)
+            _TASTE = []
+    return _TASTE
+
+
+def rank_by_taste(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Push tracks by artists from the user's taste profile to the front."""
+    taste = [name for name in taste_artists() if len(name) > 3]
+    if not taste:
+        return rows
+
+    def score(track: dict[str, str]) -> int:
+        artist = str(track.get("artist") or "").lower()
+        title = str(track.get("title") or "").lower()
+        value = 2 if any(name in artist or artist in name for name in taste) else 0
+        return value + (1 if any(name in title for name in taste) else 0)
+
+    return sorted(rows, key=lambda track: -score(track))
+
+
+def liked_tracks(limit: int = 20) -> list[dict[str, str]]:
+    yt = client()
+    if yt is None:
+        return []
+    try:
+        data = yt.get_liked_songs(limit=limit) or {}
+    except Exception as exc:
+        log.warning("ytmusic: liked songs failed (%s)", exc)
+        return []
+    return [t for t in (_track(x) for x in (data.get("tracks") or []))
+            if t["videoId"]][:limit]
+
+
+def library_playlists(limit: int = 10) -> list[dict[str, str]]:
+    yt = client()
+    if yt is None:
+        return []
+    try:
+        rows = yt.get_library_playlists(limit=limit) or []
+    except Exception as exc:
+        log.warning("ytmusic: library playlists failed (%s)", exc)
+        return []
+    return [{"title": str(r.get("title") or ""),
+             "playlistId": str(r.get("playlistId") or "")}
+            for r in rows if r.get("playlistId")][:limit]
 
 
 CACHE_DIR = os.path.join(ROOT, "yt_cache")

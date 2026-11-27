@@ -2069,6 +2069,10 @@ async def binaural_route(request: web.Request) -> web.Response:
                         headers={"Accept-Ranges": "bytes"})
 
 
+async def music_health_route(_request: web.Request) -> web.Response:
+    return web.json_response({"providers": _provider_snapshot()})
+
+
 class Scheduler:
     """Reminders and device routines that survive a hub restart."""
 
@@ -3108,6 +3112,7 @@ async def stop_everything(ctx: Context) -> Optional[str]:
     """
     stop_yt_autoplay()  # otherwise the queue treats this as "track ended"
     stop_party_mode(ctx)
+    stop_music_sync(ctx)
     if await ringing_timers(ctx):
         try:
             await ctx.device.dismiss_timers()
@@ -3306,6 +3311,86 @@ async def h_party_mode(text: str, match, ctx: Context) -> Reply:
     _PARTY_ACTIVE = True
     _PARTY_TASK = asyncio.create_task(_party_worker(ctx))
     return Reply("Party mode on. Say stop party mode to end it.", intent="party.mode")
+
+
+# Music-synced light pulses: follow playback status, then restore white.
+_MUSIC_SYNC_TASK: Optional[asyncio.Task] = None
+_MUSIC_SYNC_ACTIVE = False
+_SYNC_PALETTE = ("red", "purple", "blue", "cyan", "green", "yellow", "orange", "pink")
+
+
+async def _music_sync_worker(ctx: Context) -> None:
+    global _MUSIC_SYNC_ACTIVE
+    index, idle = 0, 0
+    while _MUSIC_SYNC_ACTIVE:
+        try:
+            state = await ctx.device.call("GET", "/integrations/radio", timeout=8)
+            playing = bool(((state or {}).get("data") or {}).get("playing"))
+        except Exception:
+            playing = False
+        if not playing:
+            idle += 1
+            if idle >= 2:
+                break
+        else:
+            idle = 0
+        for entry in list(ctx.iot.ready):
+            await ctx.iot.set_colour(entry, _SYNC_PALETTE[index % len(_SYNC_PALETTE)], 100)
+        index += 1
+        await asyncio.sleep(1.2)
+    if _MUSIC_SYNC_ACTIVE:
+        _MUSIC_SYNC_ACTIVE = False
+        background(_restore_lights(ctx))
+
+
+def stop_music_sync(ctx: Optional[Context] = None) -> None:
+    global _MUSIC_SYNC_ACTIVE, _MUSIC_SYNC_TASK
+    if not _MUSIC_SYNC_ACTIVE:
+        return
+    _MUSIC_SYNC_ACTIVE = False
+    if _MUSIC_SYNC_TASK is not None:
+        _MUSIC_SYNC_TASK.cancel()
+        _MUSIC_SYNC_TASK = None
+    if ctx is not None:
+        background(_restore_lights(ctx))
+
+
+async def h_music_sync(text: str, match, ctx: Context) -> Reply:
+    global _MUSIC_SYNC_ACTIVE, _MUSIC_SYNC_TASK
+    if not (ctx.iot.enabled and ctx.iot.ready):
+        return Reply("I don't have any local lights configured yet.", intent="music.sync")
+    if re.search(r"\b(?:stop|off|end|cancel)\b", text.lower()):
+        stop_music_sync(ctx)
+        return Reply("Light sync off. Lights restored.", intent="music.sync")
+    stop_music_sync(ctx)
+    stop_party_mode(ctx)
+    _MUSIC_SYNC_ACTIVE = True
+    _MUSIC_SYNC_TASK = asyncio.create_task(_music_sync_worker(ctx))
+    return Reply("Lights synced to the music. They'll stop when the music does.",
+                 intent="music.sync")
+
+
+async def h_light_scene(text: str, match, ctx: Context) -> Reply:
+    if not (ctx.iot.enabled and ctx.iot.ready):
+        return Reply("I don't have any local lights configured yet.", intent="light.scene")
+    low = text.lower()
+    if re.search(r"\b(?:off|normal|white|restore|reset)\b", low):
+        reply = await apply_device_action(ctx, "white")
+        reply.intent = "light.scene"
+        return reply
+    stop_party_mode(ctx)
+    stop_music_sync(ctx)
+    scene = next((name for name in sorted(ctx.iot.SCENES, key=len, reverse=True)
+                  if re.search(r"\b" + re.escape(name) + r"\b", low)), None)
+    if not scene:
+        return Reply("Try a scene like party, romance, sleep, sunset or movie.",
+                     intent="light.scene")
+    changed = 0
+    for entry in list(ctx.iot.ready):
+        if await ctx.iot.set_scene(entry, ctx.iot.SCENES[scene]):
+            changed += 1
+    return Reply(f"Scene {scene} on {changed} light{'s' if changed != 1 else ''}.",
+                 intent="light.scene")
 
 
 async def h_sleep_mode(text: str, match, ctx: Context) -> Reply:
@@ -4552,6 +4637,7 @@ async def apply_device_action(ctx: "Context", action: str,
     if action == "music.stop":
         stop_yt_autoplay()
         stop_party_mode(ctx)
+        stop_music_sync(ctx)
         with contextlib.suppress(Exception):
             await ctx.device.stop_radio()
         return Reply("Music stopped.", intent="routine")
@@ -4673,6 +4759,20 @@ def note_artist(query: str) -> None:
     _music_prefs_save(prefs)
 
 
+def note_genre(genre: str) -> None:
+    """Remember moods/genres the user asks for, for ranking and prefetch."""
+    key = re.sub(r"\s+", " ", str(genre or "").strip().lower())
+    if not key or len(key) > 60:
+        return
+    prefs = _music_prefs_load()
+    genres = prefs.setdefault("genres", {})
+    entry = genres.get(key) or {"count": 0, "last": 0}
+    entry["count"] = int(entry.get("count", 0)) + 1
+    entry["last"] = time.time()
+    genres[key] = entry
+    _music_prefs_save(prefs)
+
+
 async def prefetch_music_cache() -> None:
     """Refresh this user's favourite artists when the mic opens (prefetch)."""
     global _LAST_PREFETCH
@@ -4681,18 +4781,59 @@ async def prefetch_music_cache() -> None:
         return
     _LAST_PREFETCH = now
     prefs = _music_prefs_load()
-    favourites = sorted(prefs, key=lambda k: int(prefs[k].get("count", 0)), reverse=True)[:3]
-    for artist in favourites:
-        cached = _MUSIC_CACHE.get(artist)
+    artists = [key for key, value in prefs.items()
+               if key != "genres" and isinstance(value, dict)]
+    favourites = sorted(artists, key=lambda k: int(prefs[k].get("count", 0)),
+                        reverse=True)[:3]
+    genres = prefs.get("genres") or {}
+    targets = favourites + sorted(genres, key=lambda k: int(genres[k].get("count", 0)),
+                                  reverse=True)[:2]
+    for name in targets:
+        cached = _MUSIC_CACHE.get(name)
         if isinstance(cached, dict) and time.time() - float(cached.get("at", 0)) < 3600:
             continue
         try:
-            await asyncio.to_thread(_free_music_tracks, artist, 8)
+            await asyncio.to_thread(_free_music_tracks, name, 8)
         except Exception as exc:
-            log.debug("prefetch %s failed: %s", artist, exc)
+            log.debug("prefetch %s failed: %s", name, exc)
 
 
 _MUSIC_CACHE: dict[str, Any] = {}
+
+# Per-provider circuit-breakers: a source that keeps failing is skipped for a
+# short cooldown so one dead provider cannot stall every music request.
+_PROVIDER_HEALTH: dict[str, dict[str, float | int]] = {}
+
+
+def _provider_ok(source: str) -> bool:
+    entry = _PROVIDER_HEALTH.get(source)
+    return not entry or float(entry.get("until", 0)) <= time.monotonic()
+
+
+def _provider_result(source: str, ok: bool) -> None:
+    entry = _PROVIDER_HEALTH.setdefault(
+        source, {"fails": 0, "until": 0.0, "skips": 0})
+    if ok:
+        entry["fails"] = 0
+        entry["until"] = 0.0
+    else:
+        entry["fails"] = int(entry.get("fails", 0)) + 1
+        cooldown = min(900, 30 * (2 ** min(int(entry["fails"]) - 1, 5)))
+        entry["until"] = time.monotonic() + cooldown
+        log.warning("music provider %s cooling down %ds after failure",
+                    source, cooldown)
+
+
+def _provider_snapshot() -> dict[str, Any]:
+    now = time.monotonic()
+    return {
+        name: {
+            "fails": int(entry.get("fails", 0)),
+            "cooldown_left": max(0, round(float(entry.get("until", 0)) - now)),
+            "available": float(entry.get("until", 0)) <= now,
+        }
+        for name, entry in _PROVIDER_HEALTH.items()
+    }
 
 
 def _music_cache_load() -> None:
@@ -4726,13 +4867,15 @@ def _music_relevance(query: str, track: dict[str, Any]) -> int:
 
 
 def _music_sources(query: str, genre: str, source: str, limit: int) -> list[dict[str, Any]]:
-    if freemusic is None:
+    if freemusic is None or not _provider_ok(source):
         return []
     try:
         result = freemusic.search(query, genre, source, limit)
+        _provider_result(source, True)
         return list(result.get("results") or [])
     except Exception as exc:
         log.debug("freemusic %s failed: %s", source, exc)
+        _provider_result(source, False)
         return []
 
 
@@ -4935,6 +5078,7 @@ async def h_music_mood(text: str, match, ctx: Context) -> Reply:
     if ytmusic_source is not None and ytmusic_source.available():
         mood = ytmusic_source.resolve_mood(query)
         if mood:
+            note_genre(mood)
             try:
                 playlists = await asyncio.to_thread(
                     ytmusic_source.mood_playlists, mood, 3)
@@ -5041,6 +5185,43 @@ async def h_music_similar(text: str, match, ctx: Context) -> Reply:
         ctx, rows[1:], shuffle=bool(re.search(r"\bshuffle\b", text, re.I)),
         announce="More like this", intent="music.similar")
     return reply or Reply("I couldn't find similar songs right now.", intent="music.similar")
+
+
+async def h_music_liked(text: str, match, ctx: Context) -> Reply:
+    if not _yt_ready():
+        return Reply("Liked songs need YouTube Music set up on this computer.",
+                     intent="music.liked")
+    try:
+        rows = await asyncio.to_thread(ytmusic_source.liked_tracks, 20)
+    except Exception as exc:
+        log.debug("liked songs failed: %s", exc)
+        rows = []
+    reply = await _play_yt_tracks(
+        ctx, rows, shuffle=bool(re.search(r"\bshuffle\b", text, re.I)),
+        announce="Your liked songs", intent="music.liked")
+    return reply or Reply("I couldn't load your liked songs right now.",
+                          intent="music.liked")
+
+
+async def h_music_taste(text: str, match, ctx: Context) -> Reply:
+    if not _yt_ready():
+        return Reply("Your taste mix needs YouTube Music set up on this computer.",
+                     intent="music.taste")
+    try:
+        artists = await asyncio.to_thread(ytmusic_source.taste_artists)
+        rows: list[dict[str, Any]] = []
+        for artist in artists[:4]:
+            rows.extend(await asyncio.to_thread(ytmusic_source.search, artist, 5))
+            if len(rows) >= 10:
+                break
+    except Exception as exc:
+        log.debug("taste mix failed: %s", exc)
+        rows = []
+    reply = await _play_yt_tracks(
+        ctx, rows, shuffle=bool(re.search(r"\bshuffle\b", text, re.I)),
+        announce="Your taste mix", intent="music.taste")
+    return reply or Reply("I couldn't build a taste mix right now.",
+                          intent="music.taste")
 
 
 async def h_personal_fact(text: str, match, ctx: Context) -> Reply:
@@ -5815,6 +5996,21 @@ INTENTS: list[Intent] = [
         ),
         h_radio,
     ),
+    Intent("music.sync", compile_all(
+        r"\bsync\b.*\blights?\b.*\bmusic\b",
+        r"\blights?\b.*\b(?:dance|pulse|flash)\b.*\bmusic\b",
+        r"\bmusic\s+(?:sync\s+)?lights?\b",
+    ), h_music_sync),
+    Intent("music.liked", compile_all(
+        r"\bplay\b.*\bmy\s+liked\s+(?:songs?|music|tracks?)\b",
+        r"\bplay\b.*\bmy\s+favourites?\b",
+        r"\b(?:metti|riproduci)\b.*\b(?:preferiti|mi\s+piace)\b",
+    ), h_music_liked),
+    Intent("music.taste", compile_all(
+        r"\bplay\b.*\b(?:my\s+)?taste\s+mix\b",
+        r"\bplay\b.*\bsomething\s+(?:i|we)\s+(?:like|love)\b",
+        r"\bplay\b.*\bmy\s+favourite\s+artists?\b",
+    ), h_music_taste),
     Intent("music.trending", compile_all(
         r"\b(?:play|put on|what'?s|show me|give me)\b.*\btrending\b",
         r"\btrending\b.*\b(?:music|songs?|hits?|tracks?)\b",
@@ -6145,6 +6341,12 @@ INTENTS: list[Intent] = [
         ),
         h_light_brightness,
     ),
+    Intent("light.scene", compile_all(
+        r"\b(?:set|activate|start|run)\b.*\b(?:party|romance|romantic|sleep|sunset|movie)\s+scene\b",
+        r"\b(?:party|romance|romantic|sleep|sunset|movie)\s+scene\b",
+        r"\bscene\s+(?:off|normal|white|restore|reset)\b",
+        r"\bscena\b",
+    ), h_light_scene),
     Intent("ha.scene", compile_all(r"\b(?:activate|run|start|attiva|esegui)\b.*\bscene\b\s*(?P<target>.+)?$"), h_ha_scene),
     Intent(
         "ha.off",
@@ -6779,7 +6981,8 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
     MEDIA_INTENTS = {"radio", "music.mood", "music.stop", "music.pause", "music.resume",
                      "music.status", "music.playlist", "music.next", "music.artist",
                      "music.trending", "music.new", "music.similar",
-                     "movie.mode", "party.mode", "sleep.mode"}
+                     "movie.mode", "party.mode", "sleep.mode",
+                     "music.liked", "music.taste"}
     chat_lock = asyncio.Lock()
 
     def chat_payload(model: str, content: str) -> dict[str, Any]:
@@ -7242,6 +7445,7 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
     app.router.add_get("/alert-tone.wav", alert_tone_route)
     app.router.add_get("/binaural.mp3", binaural_route)
     app.router.add_get("/yt/{token}", yt_proxy_route)
+    app.router.add_get("/music-health", music_health_route)
     async def intents_reload(_request: web.Request) -> web.Response:
         """Re-read custom_intents.json and apply atomically, with rollback."""
         global CUSTOM_INTENTS, DISABLED_INTENTS

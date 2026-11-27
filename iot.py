@@ -328,6 +328,29 @@ class IotRegistry:
             return False
         return True
 
+    SCENES: dict[str, int] = {
+        "sunset": 1, "sunrise": 2, "party": 2, "romance": 3,
+        "sleep": 1, "movie": 4, "romantic": 3, "festa": 2,
+    }
+
+    def _scene_sync(self, entry: dict[str, Any], scene: int) -> Any:
+        return self._device(entry).set_scene(max(1, min(4, int(scene))))
+
+    async def set_scene(self, entry: dict[str, Any], scene: int) -> bool:
+        kind = str(entry.get("kind") or "bulb").lower()
+        if kind in {"plug", "switch", "outlet", "socket"}:
+            return False
+        try:
+            result = await asyncio.to_thread(self._scene_sync, entry, scene)
+        except Exception as exc:
+            log.warning("iot scene %s failed: %s", entry.get("name") or entry.get("ip"), exc)
+            return False
+        if self._failed(result):
+            log.warning("iot scene %s: %s", entry.get("name") or entry.get("ip"),
+                        (result or {}).get("Error") if isinstance(result, dict) else result)
+            return False
+        return True
+
     # -- reporting ---------------------------------------------------
     def describe(self) -> str:
         if not self.devices:
