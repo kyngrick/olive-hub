@@ -90,6 +90,19 @@ MUSIC_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mus
 MUSIC_CACHE_TTL = 14 * 24 * 3600
 MUSIC_PREFS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "music_prefs.json")
 _LAST_PREFETCH = 0.0
+SELF_BRIEF_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "olive_self_brief.txt")
+SELF_FULL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "olive_self.md")
+
+
+def _read_self(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read().strip()
+    except Exception:
+        return ""
+
+
+SELF_BRIEF = _read_self(SELF_BRIEF_FILE)
 CALENDAR_SYNC_SECONDS = 600
 BRIEFING_HOUR = 7
 
@@ -5653,6 +5666,54 @@ async def h_system_status(text: str, match, ctx: Context) -> Reply:
         intent="system.status")
 
 
+def _self_section(title: str, limit: int = 420) -> str:
+    """Read one section of olive_self.md so self-answers stay grounded."""
+    full = _read_self(SELF_FULL_FILE)
+    if not full:
+        return ""
+    match = re.search(r"^## " + re.escape(title) + r"\s*$(.*?)(?=^## |\Z)",
+                      full, re.MULTILINE | re.DOTALL)
+    if not match:
+        return ""
+    text = re.sub(r"^[-*#]+\s*", "", match.group(1).strip(), flags=re.MULTILINE)
+    return re.sub(r"\s+", " ", text)[:limit]
+
+
+async def h_self_about(text: str, match, ctx: Context) -> Reply:
+    """Answer identity / user / work-history questions from self knowledge."""
+    low = str(text or "").lower()
+    if re.search(r"\b(?:know me|about me|who am i|my name|my birthday|"
+                 r"di me|chi sono|cosa sai)\b", low):
+        parts = [_self_section("What I know about Ricky", 260) or
+                 "You're Ricky, Kyng Rick, in the Europe/Rome timezone, and you "
+                 "love reggae and dancehall."]
+        if ctx.memory:
+            remembered = ctx.memory.context()
+            if remembered:
+                parts.append(re.sub(r"^Long-term memory\..*?aloud\.\s*", "",
+                                    remembered)[:220])
+        return Reply(" ".join(parts), intent="self.about")
+    if re.search(r"\b(?:built you|built olive|worked on you|who made you|"
+                 r"collaborator|our work|what we did|chi ti ha creato)\b", low):
+        section = _self_section("Work we have done together (chronological, condensed)")
+        lead = "My collaborator in this chat and I built me with you. "
+        return Reply(lead + (section or "Everything runs locally on this PC."),
+                     intent="self.about")
+    if re.search(r"\b(?:what can you do|capabilities|skills|help me|"
+                 r"cosa puoi fare|cosa sai fare)\b", low):
+        return Reply(
+            "I can control the lights and TV, wake the TV over the network, play "
+            "your YouTube Music and live news, set alarms, reminders, timers and "
+            "light routines, take WhatsApp messages with your permission, run the "
+            "local dashboard and answer questions. "
+            f"{len(INTENTS)} intents are live.", intent="self.about")
+    return Reply(_self_section("Who I am", 300) or
+                 "I'm Olive, your local-first assistant on this PC, speaking "
+                 "through the LibreEcho speaker. I was built with you and my "
+                 "collaborator, and I remember what you teach me.",
+                 intent="self.about")
+
+
 def oh_intents_for_status() -> list:
     return INTENTS
 
@@ -5816,6 +5877,15 @@ async def h_system_reminders_status(text: str, match, ctx: Context) -> Reply:
 
 
 INTENTS: list[Intent] = [
+    Intent("self.about", compile_all(
+        r"\b(?:who|what)\s+are\s+you\b",
+        r"\b(?:tell\s+me\s+about\s+yourself|about\s+yourself)\b",
+        r"\b(?:what\s+do\s+you\s+know\s+about\s+me|do\s+you\s+know\s+me)\b",
+        r"\b(?:who\s+(?:built|made|created)\s+you|who\s+did\s+you\s+work\s+with)\b",
+        r"\b(?:what\s+can\s+you\s+do|what\s+are\s+your\s+capabilities)\b",
+        r"\b(?:did\s+you|have\s+you)\s+(?:work|build|help)\b.*\bolive\b",
+        r"\bchi\s+sei\b|\bcosa\s+puoi\s+fare\b|\bcosa\s+sai\s+di\s+me\b",
+    ), h_self_about),
     Intent("help", compile_all(r"\b(help|what can you do|cosa sai fare|aiuto)\b"), h_help),
     Intent("iot.scan", compile_all(
         r"\b(?:find|scan (?:for|the)?|look for|discover)\b.*\b(?:new\s+)?(?:devices?|lights?|bulbs?|things)\b",
@@ -7010,7 +7080,15 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
         text = str(payload.get("text") or "")
         reply = await router.route(text)
         if reply is None:
-            return web.json_response({"handled": False, "text": text}, status=404)
+            # Unmatched speech still deserves an answer: use the same
+            # intent-then-LLM chain as the chat endpoint.
+            spoken = await answer(text)
+            if not spoken:
+                return web.json_response({"handled": False, "text": text}, status=404)
+            note_spoken(spoken)
+            await ctx.speech.say(spoken)
+            return web.json_response({"handled": True, "intent": "llm",
+                                      "text": spoken})
         # /command is used by dashboards and scripts: speak through the device.
         note_spoken(reply.text)
         await ctx.speech.say(reply.text)
@@ -7088,6 +7166,8 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
         if not settings.llm_url:
             return None
         system = settings.system_prompt
+        if SELF_BRIEF:
+            system += "\n\n" + SELF_BRIEF
         if _looks_italian(text) or settings.language.startswith("it"):
             system += (
                 "\nThe user is speaking Italian: reply in natural, standard Italian. "
@@ -7097,6 +7177,10 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
             remembered = ctx.memory.context()
             if remembered:
                 system = f"{system}\n\n{remembered}"
+        now = dt.datetime.now(LOCAL_TZ)
+        system += (f"\nLive context: it is {now:%A %d %B %Y %H:%M} in Europe/Rome. "
+                   f"{len(ctx.scheduler.list('alarm'))} alarms and "
+                   f"{len(ctx.scheduler.list('reminder'))} reminders are pending.")
         messages: list[dict[str, str]] = [{"role": "system", "content": system}]
         messages.extend(history)
         messages.append({"role": "user", "content": text})
@@ -7139,7 +7223,7 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
 
     router.llm_answer = llm_answer
 
-    async def answer(text: str) -> str:
+    async def answer(text: str, extra_history: Optional[list[dict[str, str]]] = None) -> str:
         convo = ctx.conversation
         clean = normalise(text)
 
@@ -7238,6 +7322,8 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
         ctx.follow_up_window = 0.0
 
         history = convo.history()
+        if extra_history:
+            history = list(extra_history)[-10:] + history
         log.info("chat turn %r (history=%d)", text[:80], len(history))
 
         # 3. Local intents first (radio, timers, home, time ...).
@@ -7342,9 +7428,21 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
         log.info("chat request: stream=%s (serving %s) messages=%d",
                  bool(body.get("stream")), "sse" if wants_stream else "json", len(messages))
 
+        caller_history: list[dict[str, str]] = []
+        skipped_last = False
+        for msg in reversed(messages):
+            role, content_value = msg.get("role"), msg.get("content")
+            if not skipped_last and role == "user":
+                skipped_last = True
+                continue
+            if role in ("user", "assistant") and isinstance(content_value, str) \
+                    and content_value.strip():
+                caller_history.append({"role": role, "content": content_value.strip()})
+        caller_history.reverse()
+
         async with chat_lock:
             try:
-                content = await answer(str(last or ""))
+                content = await answer(str(last or ""), caller_history)
             except Exception as exc:
                 log.exception("chat failed: %s", exc)
                 content = "Sorry, something went wrong."
