@@ -609,6 +609,24 @@ class LibreEcho:
         value = audio.get(self._volume_key(audio))
         return int(value) if isinstance(value, (int, float)) else None
 
+    async def is_media_playing(self) -> bool:
+        """True for cast media or the Echo's own radio stream.
+
+        The speaker reports state='idle' while its native radio plays, so
+        checking /playback alone misses the most common music source.
+        """
+        try:
+            state = await self.playback()
+            if str(state.get("state") or "").lower() == "playing":
+                return True
+        except Exception:
+            pass
+        try:
+            result = await self.call("GET", "/integrations/radio", timeout=8)
+            return bool(((result or {}).get("data") or {}).get("playing"))
+        except Exception:
+            return False
+
     # ---- LED --------------------------------------------------------
     async def led(self) -> dict[str, Any]:
         return (await self.call("GET", "/led") or {}).get("data") or {}
@@ -1337,19 +1355,16 @@ class Speech:
 
     async def _duck(self) -> Optional[tuple[str, int, int]]:
         """Lower the music while speaking. Live radio streams cannot pause, so duck volume."""
-        if self.settings.duck_mode == "none" or self._pending is not None:
+        if (not self.settings.duck_music or self.settings.duck_mode == "none"
+                or self._pending is not None):
             # Already ducked for an earlier announcement; its restore owns the level.
             return None
-        try:
-            state = await self.device.playback()
-        except Exception:
-            return None
-        if str(state.get("state") or "").lower() != "playing":
+        if not await self.device.is_media_playing():
             return None
         volume = await self.device.current_volume()
         if not volume or volume <= 5:
             return None
-        ducked = max(5, int(volume * 0.35))
+        ducked = max(8, int(volume * 0.4))
         try:
             await self.device.set_volume(ducked)
         except Exception:
@@ -1379,20 +1394,16 @@ class Speech:
         The device's volume is global, so this works for Music Assistant and
         native radio alike.  A watchdog restores it if the turn never finishes.
         """
-        if (self.settings.duck_mode == "none" or self.settings.dry_run
-                or self._pending is not None):
+        if (not self.settings.duck_music or self.settings.duck_mode == "none"
+                or self.settings.dry_run or self._pending is not None):
             return None
-        try:
-            state = await self.device.playback()
-        except Exception:
-            return None
-        if str(state.get("state") or "").lower() != "playing":
+        if not await self.device.is_media_playing():
             return None
         try:
             volume = await self.device.current_volume()
             if not volume or volume <= 5:
                 return None
-            target = max(1, min(10, int(volume * 0.15)))
+            target = max(8, min(28, int(volume * 0.3)))
             await self.device.set_volume(target)
         except Exception as exc:
             log.debug("listening duck failed: %s", exc)
@@ -2011,18 +2022,29 @@ def _local_lan_ip() -> str:
         return "127.0.0.1"
 
 
-def alert_tone_url() -> str:
-    return f"http://{_local_lan_ip()}:{os.getenv('HUB_PORT', '8765')}/alert-tone.wav"
+def alert_tone_url(kind: str = "alarm") -> str:
+    name = "timer-tone.wav" if kind == "timer" else "alert-tone.wav"
+    return f"http://{_local_lan_ip()}:{os.getenv('HUB_PORT', '8765')}/{name}"
 
 
-async def alert_tone_route(_request: web.Request) -> web.Response:
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "olive-alert.wav")
+async def _tone_route(request: web.Request) -> web.Response:
+    filename = "olive-timer.wav" if request.path.endswith("timer-tone.wav") \
+        else "olive-alert.wav"
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
     try:
         with open(path, "rb") as handle:
             data = handle.read()
         return web.Response(body=data, content_type="audio/wav")
     except Exception:
         return web.Response(status=404)
+
+
+async def alert_tone_route(request: web.Request) -> web.Response:
+    return await _tone_route(request)
+
+
+async def timer_tone_route(request: web.Request) -> web.Response:
+    return await _tone_route(request)
 
 
 # GoogleVideo URLs are >1 KB and the Echo rejects station URLs that long.
@@ -2208,9 +2230,9 @@ class Scheduler:
             ok, error = True, ""
             voice = self.voice_in_use()
             try:
-                if item.kind in ("alarm", "reminder") and self.alert_fn:
+                if item.kind in ("alarm", "reminder", "timer") and self.alert_fn:
                     try:
-                        await self.alert_fn()
+                        await self.alert_fn(item.kind)
                     except Exception as exc:
                         log.debug("alert tone failed: %s", exc)
                 if item.announce:
@@ -3152,7 +3174,7 @@ async def stop_everything(ctx: Context) -> Optional[str]:
         pass
 
     try:
-        if await ctx.device.is_playing():
+        if await ctx.device.is_media_playing():
             await ctx.device.stop_radio()
             return "Stopped."
     except Exception:
@@ -3162,7 +3184,26 @@ async def stop_everything(ctx: Context) -> Optional[str]:
 
 async def h_stop_everything(text: str, match, ctx: Context) -> Reply:
     ctx.pending = None
+    low = str(text or "").lower()
+    cancelled = 0
+    # STOP_COMMAND preempts timer.cancel / alarm.cancel, so handle them here.
+    if re.search(r"\btimers?\b", low):
+        cancelled += await ctx.scheduler.cancel("timer")
+        with contextlib.suppress(Exception):
+            for timer in await ctx.device.list_timers():
+                timer_id = timer.get("id")
+                if timer_id is not None:
+                    await ctx.device.cancel_timer(str(timer_id))
+                    cancelled += 1
+    if re.search(r"\balarms?\b", low):
+        cancelled += await ctx.scheduler.cancel("alarm")
     said = await stop_everything(ctx)
+    if re.search(r"\btimers?\b", low):
+        return Reply(f"Timer stopped. {said or ''}".strip(), intent="stop")
+    if re.search(r"\balarms?\b", low):
+        return Reply(f"Alarm stopped. {said or ''}".strip(), intent="stop")
+    if cancelled:
+        return Reply(f"Stopped. {said or ''}".strip(), intent="stop")
     return Reply(said or "There's nothing to stop.", intent="stop")
 
 
@@ -3404,6 +3445,32 @@ async def h_light_scene(text: str, match, ctx: Context) -> Reply:
             changed += 1
     return Reply(f"Scene {scene} on {changed} light{'s' if changed != 1 else ''}.",
                  intent="light.scene")
+
+
+async def h_leaving_mode(text: str, match, ctx: Context) -> Reply:
+    """Leaving home: shut everything down; coming home: lights back on."""
+    low = str(text or "").lower()
+    returning = bool(re.search(
+        r"\b(?:i'?m|i\s+am|we'?re|we\s+are|sono)\s+(?:back|home|arrivati?|tornati?)\b"
+        r"|\bwelcome\s+home\b|\bback\s+home\b|\bhomecoming\b", low))
+    if returning:
+        reply = await apply_device_action(ctx, "white")
+        reply.intent = "leaving.mode"
+        reply.text = "Welcome home. " + reply.text
+        return reply
+    stop_yt_autoplay()
+    stop_party_mode(ctx)
+    stop_music_sync(ctx)
+    with contextlib.suppress(Exception):
+        await ctx.device.stop_radio()
+    lights = await apply_device_action(ctx, "off")
+    tv_off = False
+    with contextlib.suppress(Exception):
+        tv_off = bool(getattr(await ctx.tv.power_off(), "ok", False))
+    return Reply(
+        f"Leaving home mode on. {lights.text} "
+        f"TV {'off' if tv_off else 'left as it was'}; music stopped.",
+        intent="leaving.mode")
 
 
 async def h_sleep_mode(text: str, match, ctx: Context) -> Reply:
@@ -6277,6 +6344,13 @@ INTENTS: list[Intent] = [
         r"\bsystem\s+diagnostics\b",
         r"\brun\s+(?:system\s+)?diagnostics\b",
     ), h_system_diagnostics),
+    Intent("leaving.mode", compile_all(
+        r"\b(?:i'?m|we'?re)\s+(?:leaving|going\s+out|out)\b",
+        r"\b(?:leave|leaving)\s+home\b|\baway\s+mode\b",
+        r"\b(?:i'?m|i\s+am|we'?re|we\s+are|sono)\s+(?:back|home)\b"
+        r"|\bback\s+home\b|\bwelcome\s+home\b",
+        r"\b(?:sono\s+fuori|arrivo|torno\s+a\s+casa|benvenuto\s+a\s+casa)\b",
+    ), h_leaving_mode),
     Intent("sleep.mode", compile_all(
         r"\bsleep\s+mode\b",
         r"\b(?:go|get)\s+to\s+sleep\b",
@@ -6953,7 +7027,8 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
     @web.middleware
     async def auth(request: web.Request, handler):
         if (settings.hub_token
-                and request.path not in ("/health", "/alert-tone.wav", "/binaural.mp3")
+                and request.path not in ("/health", "/alert-tone.wav",
+                                         "/timer-tone.wav", "/binaural.mp3")
                 and not request.path.startswith("/yt/")):
             header = request.headers.get("X-Olive-Token") or ""
             auth = request.headers.get("Authorization") or ""
@@ -7585,6 +7660,7 @@ def make_app(settings: Settings, router: Router, ctx: Context) -> web.Applicatio
 
     app.router.add_get("/health", health)
     app.router.add_get("/alert-tone.wav", alert_tone_route)
+    app.router.add_get("/timer-tone.wav", timer_tone_route)
     app.router.add_get("/binaural.mp3", binaural_route)
     app.router.add_get("/yt/{token}", yt_proxy_route)
     app.router.add_get("/music-health", music_health_route)
@@ -7797,10 +7873,24 @@ async def run(settings: Optional[Settings] = None) -> None:
     tv = TvControl(settings)
     memory = PermanentMemory(path=settings.memory_file, enabled=settings.memory_enabled)
     iot = IotRegistry(path=settings.iot_keys_file, enabled=settings.iot_enabled)
-    async def play_alert_tone() -> None:
-        url = alert_tone_url()
-        await ctx_radio.add({"word": "olive-alert", "name": "Olive alert", "url": url})
-        await device.play_radio("olive-alert")
+    async def _restore_alert_volume(level: int, delay: float = 14.0) -> None:
+        await asyncio.sleep(delay)
+        with contextlib.suppress(Exception):
+            current = await device.current_volume()
+            if current is not None and current > level:
+                await device.set_volume(level)
+
+    async def play_alert_tone(kind: str = "alarm") -> None:
+        previous = await device.current_volume()
+        boosted = max(previous or 0, 72 if kind == "timer" else 62)
+        with contextlib.suppress(Exception):
+            await device.set_volume(boosted)
+        url = alert_tone_url(kind)
+        word = "olive-timer" if kind == "timer" else "olive-alert"
+        await ctx_radio.add({"word": word, "name": "Olive alert", "url": url})
+        await device.play_radio(word)
+        if previous is not None:
+            asyncio.create_task(_restore_alert_volume(previous))
 
     ctx_radio = RadioLibrary(device, settings, http)
     global _YT_DEVICE, _YT_RADIO
